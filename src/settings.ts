@@ -1,6 +1,6 @@
 import { App, PluginSettingTab, Setting, DropdownComponent, requestUrl } from 'obsidian';
 import type FleurEpubPlugin from './main';
-import { PROMPT_PRESETS, getPromptPreset, getPresetPreview, ANNOTATION_DEFAULT_BASE_LIMIT, type PromptPresetKey } from './ai-prompts';
+import { PROMPT_PRESETS, getPromptPreset, getPresetPreview, isCustomPresetKey, ANNOTATION_DEFAULT_BASE_LIMIT, type PromptPresetKey } from './ai-prompts';
 
 /** 阅读背景主题：浅色 / 深色 / 暖黄 / 豆绿（微信读书式四色） */
 export type ReaderTheme = 'light' | 'dark' | 'sepia' | 'green';
@@ -15,6 +15,10 @@ export interface FleurEpubSettings {
 	theme: ReaderTheme;
 	/** 页边距（px，foliate renderer margin 属性，滚动/翻页通用） */
 	pageMargin: number;
+	/** 左边距（px，在对称页边距基础上的额外偏移；与右边距独立） */
+	marginLeft: number;
+	/** 右边距（px，在对称页边距基础上的额外偏移；与左边距独立） */
+	marginRight: number;
 	/** 行距（行高倍数） */
 	lineHeight: number;
 	/** 段间距（em） */
@@ -31,7 +35,8 @@ export interface FleurEpubSettings {
 	model: string;
 	temperature: number;
 	promptPreset: PromptPresetKey;
-	customPrompt: string;
+	/** 三个自定义提示词槽（对应 promptPreset 的 custom-1/2/3） */
+	customPrompts: string[];
 	/** 侧边栏批注场景的基准字数上限 */
 	annotationLimit: number;
 	/** AI 浮窗位置记忆 */
@@ -40,6 +45,8 @@ export interface FleurEpubSettings {
 	annPopPos?: { left: number; top: number };
 	/** 批注卡片尺寸记忆（用户缩放后固定） */
 	annPopSize?: { w: number; h: number };
+	/** 批注笔记导出文件夹（vault 内相对路径；'' = 根目录，默认 FleurEpub） */
+	noteFolder: string;
 }
 
 export const DEFAULT_SETTINGS: FleurEpubSettings = {
@@ -48,6 +55,8 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	columns: 1,
 	theme: 'light',
 	pageMargin: 36,
+	marginLeft: 0,
+	marginRight: 0,
 	lineHeight: 1.9,
 	paraSpacing: 0.85,
 	fontFamily: '',
@@ -58,8 +67,9 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	model: 'deepseek-chat',
 	temperature: 0.7,
 	promptPreset: 'default',
-	customPrompt: '',
+	customPrompts: ['', '', ''],
 	annotationLimit: 250,
+	noteFolder: 'FleurEpub',
 };
 
 export class FleurEpubSettingTab extends PluginSettingTab {
@@ -137,6 +147,40 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 						this.plugin.getActiveReader()?.applyReaderStyles();
 					}),
 			);
+
+		// ── 笔记导出（对齐 fleur-pdf：扫描 vault 文件夹下拉选择，导出时自动建目录） ──
+		new Setting(containerEl).setName('笔记导出').setHeading();
+
+		// 扫描 vault 中的所有文件夹供选择（fleur-pdf 同款实现）
+		const folderSet = new Set<string>();
+		folderSet.add(''); // 根目录选项
+		this.app.vault.getAllLoadedFiles().forEach((file) => {
+			if (file.path.includes('/')) {
+				const parts = file.path.split('/');
+				let current = '';
+				for (let i = 0; i < parts.length - 1; i++) {
+					current = current ? `${current}/${parts[i]}` : parts[i];
+					folderSet.add(current);
+				}
+			}
+		});
+
+		new Setting(containerEl)
+			.setName('导出文件夹')
+			.setDesc('批注笔记的存放位置（默认 FleurEpub，导出时自动创建）')
+			.addDropdown((drop) => {
+				drop.addOption('', 'Vault 根目录');
+				// 当前设置值（如默认 FleurEpub）尚未创建时也要出现在选项里，避免回显错位
+				const current = this.plugin.settings.noteFolder ?? '';
+				if (current && !folderSet.has(current)) folderSet.add(current);
+				for (const folder of Array.from(folderSet).sort()) {
+					if (folder) drop.addOption(folder, folder);
+				}
+				drop.setValue(current).onChange(async (value) => {
+					this.plugin.settings.noteFolder = value;
+					await this.plugin.saveSettings();
+				});
+			});
 
 		// ── AI 配置（与 fleur-pdf 对齐：多提供商 + 提示词详情预览 + 测试连接） ──
 		new Setting(containerEl).setName('AI 配置').setHeading();
@@ -256,20 +300,25 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 			const preset = getPromptPreset(this.plugin.settings.promptPreset) ?? PROMPT_PRESETS[0];
 			const baseLimit = this.plugin.settings.annotationLimit || ANNOTATION_DEFAULT_BASE_LIMIT;
 
-			if (this.plugin.settings.promptPreset === 'custom') {
-				new Setting(promptDetailEl)
-					.setName('自定义提示词')
-					.setDesc('留空则回落到「默认」模式')
-					.setClass('fleur-epub-setting-block')
-					.addTextArea((ta) => {
-						ta.setPlaceholder('在此写下你自己的系统提示词。例如：你是一位……请根据用户选中的文本……')
-							.setValue(this.plugin.settings.customPrompt)
-							.onChange(async (value) => {
-								this.plugin.settings.customPrompt = value;
-								await this.plugin.saveSettings();
-							});
-						ta.inputEl.setCssStyles({ width: '100%', minHeight: '170px' });
-					});
+			if (isCustomPresetKey(this.plugin.settings.promptPreset)) {
+				// 三个自定义槽位（对齐 FleurAnnotation）：当前选中的槽位加高亮提示
+				const activeSlot = this.plugin.settings.promptPreset === 'custom-1' ? 1
+					: this.plugin.settings.promptPreset === 'custom-2' ? 2 : 3;
+				for (let i = 1; i <= 3; i++) {
+					new Setting(promptDetailEl)
+						.setName(`自定义提示词 ${i}${i === activeSlot ? '（当前使用）' : ''}`)
+						.setDesc(i === 1 ? '留空则回落到「默认」模式' : '')
+						.setClass('fleur-epub-setting-block')
+						.addTextArea((ta) => {
+							ta.setPlaceholder('在此写下你自己的系统提示词。例如：你是一位……请根据用户选中的文本……')
+								.setValue(this.plugin.settings.customPrompts[i - 1] ?? '')
+								.onChange(async (value) => {
+									this.plugin.settings.customPrompts[i - 1] = value;
+									await this.plugin.saveSettings();
+								});
+							ta.inputEl.setCssStyles({ width: '100%', minHeight: i === activeSlot ? '170px' : '90px' });
+						});
+				}
 			} else {
 				const previewSetting = new Setting(promptDetailEl)
 					.setName('当前提示词（完整内容）')
@@ -282,12 +331,12 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 				previewSetting.addExtraButton((btn) =>
 					btn
 						.setIcon('pencil')
-						.setTooltip('以此为基础改为自定义')
+						.setTooltip('以此为基础改为自定义 1')
 						.onClick(async () => {
-							this.plugin.settings.promptPreset = 'custom';
-							this.plugin.settings.customPrompt = preset.body;
+							this.plugin.settings.promptPreset = 'custom-1';
+							this.plugin.settings.customPrompts[0] = preset.body;
 							await this.plugin.saveSettings();
-							dropdownComp?.setValue('custom');
+							dropdownComp?.setValue('custom-1');
 							renderPromptDetail();
 						}),
 				);

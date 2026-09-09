@@ -5,11 +5,12 @@
 //   - 翻页模式：右击下一页、左击上一页（点按区域，不干扰选段），支持方向键
 // 继承 FileView：registerExtensions 接管 .epub 后，Obsidian 打开文件时回调 onLoadFile。
 
-import { FileView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
+import { FileView, Menu, Notice, TFile, WorkspaceLeaf } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { computeFingerprint, type BookData, type BookMeta, type EpubAnnotation, type AnnotationKind } from './store';
 import { Overlayer } from '../vendor/foliate-js/overlayer.js';
 import { AIChatPanel } from './ai-chat-modal';
+import { cleanAnnotationText } from './text-utils';
 import type { ReaderTheme } from './settings';
 import '../vendor/foliate-js/view.js';
 
@@ -17,6 +18,13 @@ export const VIEW_TYPE_EPUB = 'fleur-epub-view';
 
 /** 左右点按翻页的区域宽度占比（与微信读书一致的左右各 ~38%） */
 const ZONE_RATIO = 0.38;
+
+/** 滚动模式跨章·新手势间隔：滚轮事件间隔超过该毫秒数视为「松手后再滚」，立即翻章 */
+const SCROLL_GESTURE_GAP = 250;
+/** 滚动模式跨章·章缘累计门槛：停到章顶/章底后，继续推过该像素量（约 1/3 屏）即翻章 */
+const EDGE_CHAIN_ACC = 300;
+/** 跨章冷却：翻章后短暂冷却，防止短章节落位前被二次触发连翻两章 */
+const CHAIN_COOL = 400;
 
 /** 标注颜色（键持久化到书数据；值用于 overlayer 绘制） */
 export const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -80,6 +88,8 @@ export class EpubReaderView extends FileView {
 	private bookData: BookData | null = null;
 	private fingerprint = '';
 	private saveTimer: number | null = null;
+	/** 标注重挂就绪轮询计时（foliate load 事件早于 overlayer 创建，需延迟挂载） */
+	private annMountTimer: number | null = null;
 	private percentEl!: HTMLElement;
 	private titleEl!: HTMLElement;
 	private readerEl!: HTMLElement;
@@ -213,9 +223,10 @@ export class EpubReaderView extends FileView {
 					doc.querySelectorAll('[title]').forEach((el) => el.removeAttribute('title'));
 				}
 				if (this.bookData) {
-					for (const a of this.bookData.annotations) {
-						void view.addAnnotation({ value: a.cfi, ...a }).catch(() => {});
-					}
+					// 注意时序：foliate 的 load 事件在 create-overlayer / #view 切换之前派发，
+					// 此时立即 addAnnotation 会因 #getOverlayer 查不到 overlayer 被静默丢弃
+					//（重开书、跨章节时标注全部消失的根因）——延迟到 overlayer 就绪后再重挂
+					this.remountAnnotationsWhenReady(view, typeof e.detail?.index === 'number' ? e.detail.index : null);
 				}
 			});
 
@@ -250,33 +261,6 @@ export class EpubReaderView extends FileView {
 			view.addEventListener('relocate', () => {
 				this.hideSelectionToolbar();
 				this.hideAnnPopup();
-				// 滚动模式章节接力：新章节上屏后，把接力期间累积的滚轮位移一次性补滚，
-				// 让跨章滚动连成一体（这是消除「过章卡一下」的关键）
-				if (this.pendingChain) {
-					const p = this.pendingChain;
-					this.pendingChain = null;
-					if (this.chainFailTimer !== null) {
-						window.clearTimeout(this.chainFailTimer);
-						this.chainFailTimer = null;
-					}
-					const r = this.foliateView?.renderer;
-					if (r && typeof r.scrollBy === 'function' && p.acc > 0) {
-						window.setTimeout(() => {
-							try {
-								// 补滚量扣除补滚前用户已原生滚过的部分，避免把已滚动的位置往回拽（顿挫感）
-								const cur = typeof r.start === 'number' ? r.start : 0;
-								let delta = p.dir * p.acc;
-								if (p.dir === 1) delta = Math.max(0, p.acc - cur);
-								else {
-									const top = (typeof r.viewSize === 'number' ? r.viewSize : 0) - (typeof r.size === 'number' ? r.size : 0);
-									// 反向：新章锚定在末尾（start≈viewSize-size），用户可能已向上滚过
-									delta = Math.min(0, top - p.acc - cur);
-								}
-								if (delta !== 0) r.scrollBy(0, delta);
-							} catch { /* 滚动失败忽略 */ }
-						}, 60);
-					}
-				}
 			});
 
 			this.readerEl.appendChild(view);
@@ -370,7 +354,14 @@ export class EpubReaderView extends FileView {
 		const renderer = this.foliateView?.renderer;
 		if (renderer?.setStyles) renderer.setStyles(this.buildTypographyCss());
 		// 页边距：foliate observed attribute（滚动/翻页两种 flow 均生效，设置即重排）
-		if (renderer) renderer.setAttribute('margin', `${this.plugin.settings.pageMargin}px`);
+		if (renderer) {
+			renderer.setAttribute('margin', `${this.plugin.settings.pageMargin}px`);
+			// 左右边距（独立调节）：在对称页边距基础上给 renderer 加额外 padding。
+			// paginator 内部有 ResizeObserver 监听自身尺寸，padding 变化自动触发重排；
+			// 不侵入 foliate 分栏/翻页数学，滚动与翻页两种 flow 均适用。
+			renderer.style.paddingLeft = `${this.plugin.settings.marginLeft ?? 0}px`;
+			renderer.style.paddingRight = `${this.plugin.settings.marginRight ?? 0}px`;
+		}
 	}
 
 	/** 微信读书 / Apple Books 风格排版 CSS（fontSize 为根字号，其余全 em 缩放） */
@@ -418,8 +409,9 @@ export class EpubReaderView extends FileView {
 			h2 { font-size: 1.3em; margin: 2em 0 1.1em; }
 			h3 { font-size: 1.12em; margin: 1.7em 0 .9em; }
 			h4, h5, h6 { font-size: 1em; margin: 1.5em 0 .8em; }
-			/* 章首元素（往往是标题）上方不要大空白：由阅读区顶部留白统一控制 */
-			body > :first-child, body > *:first-child { margin-top: 0 !important; }
+			/* 章首分隔区（微信读书式）：章节标题上方留出呼吸感，
+			   跨章滚动时章节点在视野中有可感知的驻留时长 */
+			body > :first-child { margin-top: 2.6em !important; }
 			/* 引用：Apple Books 式左线 */
 			blockquote {
 				margin: 1.2em 0;
@@ -564,10 +556,12 @@ export class EpubReaderView extends FileView {
 	private wheelAcc = 0;
 	private wheelLastAt = 0;
 	private wheelCoolUntil = 0;
-	/** 滚动模式章节接力：进行中的接力方向与累积滚轮位移（新章节 relocate 后一次性补滚） */
-	private pendingChain: { dir: 1 | -1; acc: number } | null = null;
-	/** 接力兜底计时：relocate 迟迟不来时解除累积状态，避免滚轮永久失效 */
-	private chainFailTimer: number | null = null;
+	/** 滚动模式：上次 wheel 事件时间戳，用于识别「新手势」（松手后再滚） */
+	private scrolledWheelAt = 0;
+	/** 章缘累计滚轮量：仅在已停到章顶/章底之后开始累计，离开章缘即清零 */
+	private edgeAcc: number | null = null;
+	/** 跨章冷却：防止短章节落位前被二次触发、连翻两章 */
+	private chainCoolUntil = 0;
 
 	/** 滚轮处理总入口（iframe 文档与宿主容器共用，见 onOpen / bindDocEvents） */
 	private onReaderWheel(e: WheelEvent): void {
@@ -578,33 +572,36 @@ export class EpubReaderView extends FileView {
 		}
 		const r = this.foliateView?.renderer;
 		if (!r || typeof r.viewSize !== 'number' || typeof r.end !== 'number') return;
-		if (this.pendingChain) {
-			// 接力加载中：累积位移，等 relocate（新章节上屏）后补滚
-			this.pendingChain.acc = Math.min(this.pendingChain.acc + Math.abs(e.deltaY), 1600);
-			e.preventDefault();
-			return;
-		}
+		// 章缘（顶/底）同方向滚轮一律 preventDefault：防 macOS 橡皮筋回弹、防惯性直接穿章。
+		// 跨章判定 = 新手势（松手停顿 > GAP 后再滚，立即翻章）
+		//          或 章缘继续推过 EDGE_ACC（~1/3 屏，不停车也能翻，避免「卡住不动」）。
+		// 触控板惯性阶段事件间隔 < 50ms，且从章缘刚停住时累计从零开始，
+		// 因此既不会一推就穿章，也不会永远停在章节点。
+		const now = e.timeStamp;
+		const isNewGesture = now - this.scrolledWheelAt > SCROLL_GESTURE_GAP;
+		this.scrolledWheelAt = now;
 		const atBottom = r.viewSize - r.end <= 2;
 		const atTop = r.start <= 2;
-		if (e.deltaY > 0 && atBottom) {
+		if (atBottom && e.deltaY > 0) {
 			e.preventDefault();
-			this.startChain(1);
-			void this.foliateView?.next();
-		} else if (e.deltaY < 0 && atTop) {
+			this.edgeAcc = (this.edgeAcc ?? 0) + e.deltaY;
+			if (isNewGesture || (this.edgeAcc >= EDGE_CHAIN_ACC && now > this.chainCoolUntil)) {
+				this.edgeAcc = null;
+				this.chainCoolUntil = now + CHAIN_COOL;
+				void this.foliateView?.next();
+			}
+		} else if (atTop && e.deltaY < 0) {
 			e.preventDefault();
-			this.startChain(-1);
-			void this.foliateView?.prev();
+			this.edgeAcc = (this.edgeAcc ?? 0) - e.deltaY;
+			if (isNewGesture || (this.edgeAcc >= EDGE_CHAIN_ACC && now > this.chainCoolUntil)) {
+				this.edgeAcc = null;
+				this.chainCoolUntil = now + CHAIN_COOL;
+				void this.foliateView?.prev();
+			}
+		} else {
+			// 已离开章缘或反方向：清零累计
+			this.edgeAcc = null;
 		}
-		// 其余情况不拦截：交给浏览器在滚动容器内原生滚动
-	}
-
-	private startChain(dir: 1 | -1): void {
-		this.pendingChain = { dir, acc: 0 };
-		if (this.chainFailTimer !== null) window.clearTimeout(this.chainFailTimer);
-		this.chainFailTimer = window.setTimeout(() => {
-			this.pendingChain = null;
-			this.chainFailTimer = null;
-		}, 4000);
 	}
 
 	private handleWheelGesture(delta: number): void {
@@ -718,8 +715,12 @@ export class EpubReaderView extends FileView {
 		this.currentSelDoc = doc;
 		this.selSnapshot = text;
 
-		const rect = sel.getRangeAt(0).getBoundingClientRect();
-		const host = this.toHostCoords(doc, rect.left, rect.top);
+		const range = sel.getRangeAt(0);
+		// 跨页选区：union rect 的起点在当前页之外（位于前面的页），
+		// 直接定位会把工具条/批注弹窗算到屏幕外（表现为「无法跨页标注」）。
+		// 改用「当前视口内可见的最后一个 rect」（mouseup 端）作为定位锚。
+		const anchorRect = this.visibleAnchorRect(range);
+		const host = this.toHostCoords(doc, anchorRect.left, anchorRect.top);
 
 		const bar = document.body.createDiv('fleur-epub-selbar');
 		this.selToolbar = bar;
@@ -776,16 +777,33 @@ export class EpubReaderView extends FileView {
 			});
 		}
 
-		// 定位：选段上方居中；顶部放不下换到下方
+		// 定位：可见选段上方居中；顶部放不下换到下方
 		window.requestAnimationFrame(() => {
 			const bw = bar.offsetWidth;
 			const bh = bar.offsetHeight;
-			let left = host.x + rect.width / 2 - bw / 2;
+			let left = host.x + anchorRect.width / 2 - bw / 2;
 			let top = host.y - bh - 8;
 			left = Math.max(8, Math.min(left, window.innerWidth - bw - 8));
-			if (top < 8) top = host.y + rect.height + 8;
+			if (top < 8) top = host.y + anchorRect.height + 8;
 			bar.setCssStyles({ left: `${left}px`, top: `${top}px` });
 		});
+	}
+
+	/** 跨页选区的定位锚：翻页模式下取与当前视口相交的最后一个选区 rect（mouseup 端）；
+	 *  滚动模式或无匹配时回退 union rect。 */
+	private visibleAnchorRect(range: Range): DOMRect {
+		const rects = Array.from(range.getClientRects()).filter((x) => x.width > 0 && x.height > 0);
+		if (this.plugin.settings.flow !== 'paginated' || rects.length === 0) {
+			return rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+		}
+		const r = this.foliateView?.renderer;
+		const size = typeof r?.size === 'number' ? r.size : 0;
+		const start = typeof r?.start === 'number' ? r.start : 0;
+		if (size > 0) {
+			const inView = rects.filter((x) => x.right > start + 8 && x.left < start + size - 8);
+			if (inView.length) return inView[inView.length - 1];
+		}
+		return rects[rects.length - 1];
 	}
 
 	private hideSelectionToolbar(): void {
@@ -979,6 +997,9 @@ export class EpubReaderView extends FileView {
 		mkSlider('行距', 1.4, 2.6, 0.05, () => s.lineHeight, (v) => (s.lineHeight = v), (v) => v.toFixed(2));
 		mkSlider('段距', 0, 2, 0.05, () => s.paraSpacing, (v) => (s.paraSpacing = v), (v) => `${v.toFixed(2)}em`);
 		mkSlider('页边距', 0, 80, 4, () => s.pageMargin, (v) => (s.pageMargin = v), (v) => `${v}px`);
+		// 左右边距：独立于对称页边距的额外偏移，可做不对称排版（如左 70 / 右 40）
+		mkSlider('左边距', 0, 80, 4, () => s.marginLeft ?? 0, (v) => (s.marginLeft = v), (v) => `${v}px`);
+		mkSlider('右边距', 0, 80, 4, () => s.marginRight ?? 0, (v) => (s.marginRight = v), (v) => `${v}px`);
 
 		// ── 重置 ──
 		const resetRow = panel.createDiv('fleur-epub-appear-row is-reset');
@@ -989,6 +1010,8 @@ export class EpubReaderView extends FileView {
 			s.lineHeight = 1.9;
 			s.paraSpacing = 0.85;
 			s.pageMargin = 36;
+			s.marginLeft = 0;
+			s.marginRight = 0;
 			s.fontFamily = '';
 			s.fontWeight = 400;
 			s.theme = 'light';
@@ -1064,19 +1087,32 @@ export class EpubReaderView extends FileView {
 		const pop = document.body.createDiv('fleur-epub-annpop');
 		this.annPopup = pop;
 
-		// 顶部拖拽手柄（可拖动，位置记忆；尺寸自适应内容，不做固定宽高）
-		const grip = pop.createDiv('fleur-epub-annpop-grip');
-		grip.setAttribute('aria-label', '拖动');
+		// 恢复用户记忆的尺寸（右下角缩放后固定；未缩放过则自适应内容）
+		const savedSize = this.plugin.settings.annPopSize;
+		if (savedSize) {
+			pop.setCssStyles({ width: `${savedSize.w}px`, height: `${savedSize.h}px` });
+		}
+
+		// 标题栏：整条可拖拽（位置记忆），右侧 ✕ 关闭（交互对齐 FleurAnnotation / 桌面窗口）
+		const header = pop.createDiv('fleur-epub-annpop-header');
+		header.createDiv('fleur-epub-annpop-header-title').setText('批注');
+		const closeBtn = header.createSpan('fleur-epub-annpop-close');
+		closeBtn.setText('✕');
+		closeBtn.setAttribute('aria-label', '关闭');
+		closeBtn.addEventListener('click', () => this.hideAnnPopup());
+
 		let drag: { sx: number; sy: number; ox: number; oy: number } | null = null;
-		grip.addEventListener('pointerdown', (e) => {
+		header.addEventListener('pointerdown', (e) => {
+			// ✕ 按钮上按下不进入拖拽
+			if (closeBtn.contains(e.target as Node)) return;
 			e.preventDefault();
 			const rect = pop.getBoundingClientRect();
 			drag = { sx: e.clientX, sy: e.clientY, ox: rect.left, oy: rect.top };
 			try {
-				grip.setPointerCapture(e.pointerId);
+				header.setPointerCapture(e.pointerId);
 			} catch { /* 忽略 */ }
 		});
-		grip.addEventListener('pointermove', (e) => {
+		header.addEventListener('pointermove', (e) => {
 			if (!drag) return;
 			pop.setCssStyles({
 				left: `${drag.ox + e.clientX - drag.sx}px`,
@@ -1090,41 +1126,50 @@ export class EpubReaderView extends FileView {
 			this.plugin.settings.annPopPos = { left: Math.round(rect.left), top: Math.round(rect.top) };
 			void this.plugin.saveSettings();
 		};
-		grip.addEventListener('pointerup', endDrag);
-		grip.addEventListener('pointercancel', endDrag);
+		header.addEventListener('pointerup', endDrag);
+		header.addEventListener('pointercancel', endDrag);
 
-		// 右上角 ✕ 关闭按钮
-		const closeBtn = pop.createSpan('fleur-epub-annpop-close');
-		closeBtn.setText('✕');
-		closeBtn.setAttribute('aria-label', '关闭');
-		closeBtn.addEventListener('click', () => this.hideAnnPopup());
-
-		// 图标按钮（编辑 ✏️ / 保存 ✓ / 删除 🗑，Obsidian 内置 lucide 图标）
-		const mkIconBtn = (row: HTMLElement, icon: string, label: string, cls: string, fn: () => void) => {
-			const b = row.createEl('button', `fleur-epub-annpop-icon ${cls}`);
-			b.setAttribute('aria-label', label);
-			setIcon(b, icon);
-			b.addEventListener('click', fn);
-			return b;
+		// 右下角缩放手柄（尺寸记忆；280×140 起步，不出屏）
+		const resize = pop.createDiv('fleur-epub-annpop-resize');
+		resize.setAttribute('aria-label', '调整大小');
+		let rs: { sx: number; sy: number; w: number; h: number } | null = null;
+		resize.addEventListener('pointerdown', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const rect = pop.getBoundingClientRect();
+			rs = { sx: e.clientX, sy: e.clientY, w: rect.width, h: rect.height };
+			try {
+				resize.setPointerCapture(e.pointerId);
+			} catch { /* 忽略 */ }
+		});
+		resize.addEventListener('pointermove', (e) => {
+			if (!rs) return;
+			const w = Math.max(260, Math.min(rs.w + e.clientX - rs.sx, window.innerWidth - 16));
+			const h = Math.max(140, Math.min(rs.h + e.clientY - rs.sy, window.innerHeight - 16));
+			pop.setCssStyles({ width: `${w}px`, height: `${h}px` });
+		});
+		const endResize = () => {
+			if (!rs) return;
+			rs = null;
+			const rect = pop.getBoundingClientRect();
+			this.plugin.settings.annPopSize = { w: Math.round(rect.width), h: Math.round(rect.height) };
+			void this.plugin.saveSettings();
 		};
-		const mkDelBtn = (row: HTMLElement) => {
-			mkIconBtn(row, 'trash-2', '删除标注', 'is-danger', () => {
-				void this.deleteAnnotation(ann);
-				this.hideAnnPopup();
-			});
-		};
+		resize.addEventListener('pointerup', endResize);
+		resize.addEventListener('pointercancel', endResize);
 
-		// 批注正文区：有批注 → 只读内容视图（微信读书式，点标注即看内容）；无批注 → 输入框
-		// 「编辑」切到输入态，保存后回到内容视图
+		// 批注正文区：
+		// 有批注 → 内容视图（纯文本 + 120 字截断 +「展开全文」；不出现原文、不放编辑/删除——侧边栏已有）
+		// 无批注 → 编辑视图（批注输入 + 取消/确定，⌘Enter 提交；同样不出现原文）
 		const body = pop.createDiv('fleur-epub-annpop-body');
 		let ta: HTMLTextAreaElement | null = null;
 		const renderEdit = () => {
 			body.empty();
+			body.createDiv('fleur-epub-annpop-title').setText(ann.comment ? '编辑批注' : '添加批注');
 			ta = body.createEl('textarea', 'fleur-epub-annpop-input');
-			ta.placeholder = '添加批注…';
+			ta.placeholder = '写下你的想法…';
 			ta.value = ann.comment ?? '';
-			const row = body.createDiv('fleur-epub-annpop-actions');
-			mkIconBtn(row, 'check', '保存批注', 'is-primary', () => {
+			const doSave = () => {
 				ann.comment = ta?.value.trim() || undefined;
 				this.saveBookData();
 				// 广播变更（侧边栏即时刷新）
@@ -1132,19 +1177,40 @@ export class EpubReaderView extends FileView {
 				new Notice('批注已保存', 1500);
 				if (ann.comment) renderView();
 				else this.hideAnnPopup();
+			};
+			// 按钮行：右「取消 / 确定」（CommentModal 式；删除标注走侧边栏，此处不放）
+			const row = body.createDiv('fleur-epub-annpop-btnrow');
+			const right = row.createDiv('fleur-epub-annpop-btnrow-right');
+			const cancel = right.createEl('button', 'fleur-epub-annpop-btn is-ghost');
+			cancel.setText('取消');
+			cancel.addEventListener('click', () => this.hideAnnPopup());
+			const ok = right.createEl('button', 'fleur-epub-annpop-btn is-accent');
+			ok.setText('确定');
+			ok.addEventListener('click', doSave);
+			ta.addEventListener('keydown', (e: KeyboardEvent) => {
+				if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) doSave();
 			});
-			mkDelBtn(row);
-			if (focusComment) ta.focus();
+			if (focusComment) setTimeout(() => ta?.focus(), 50);
 		};
 		const renderView = () => {
 			body.empty();
 			ta = null;
-			// 批注内容以正常字体、纯文本展示，不暴露任何 Markdown 源码
+			// 批注内容以正常字体、纯文本展示：去 Markdown 源码、去「批注：×××」原文标题行
+			const comment = cleanAnnotationText(ann.comment ?? '');
+			const MAX_CHARS = 120;
+			const isLong = comment.length > MAX_CHARS;
+			let expanded = false;
 			const content = body.createDiv('fleur-epub-annpop-comment');
-			content.setText(ann.comment ?? '');
-			const row = body.createDiv('fleur-epub-annpop-actions');
-			mkIconBtn(row, 'pencil', '编辑', '', () => renderEdit());
-			mkDelBtn(row);
+			content.setText(isLong ? comment.slice(0, MAX_CHARS) + '...' : comment);
+			const hint = body.createDiv('fleur-epub-annpop-toggle');
+			hint.setText('展开全文 ›');
+			hint.setCssStyles({ display: isLong ? 'block' : 'none' });
+			hint.addEventListener('click', () => {
+				expanded = !expanded;
+				content.setText(expanded ? comment : comment.slice(0, MAX_CHARS) + '...');
+				hint.setText(expanded ? '收起 ▲' : '展开全文 ›');
+			});
+			// 不放编辑/删除入口——侧边栏批注列表已有完整编辑与删除操作
 		};
 		if (ann.comment) renderView();
 		else renderEdit();
@@ -1315,6 +1381,35 @@ export class EpubReaderView extends FileView {
 		} catch { /* 忽略 */ }
 	}
 
+	/**
+	 * 重挂全部标注：等待目标章节的 overlayer 就绪后再执行。
+	 * foliate 的 load 事件（paginator afterLoad）先于 create-overlayer 派发、
+	 * 更先于 renderer.#view 切换，load 时机挂载会被 #getOverlayer 静默丢弃。
+	 * addAnnotation 内部按当前 section 过滤，非当前章节自动跳过，全量重挂开销可忽略。
+	 */
+	private remountAnnotationsWhenReady(view: any, index: number | null): void {
+		if (this.annMountTimer !== null) {
+			window.clearTimeout(this.annMountTimer);
+			this.annMountTimer = null;
+		}
+		let tries = 0;
+		const attempt = () => {
+			this.annMountTimer = null;
+			if (!this.bookData || this.foliateView !== view) return;
+			const contents = view.renderer?.getContents?.() ?? [];
+			const ready = contents.some((c: any) => c.overlayer && (index === null || c.index === index));
+			if (!ready && tries++ < 50) {
+				// overlayer 未就绪（章节文档尚未完成渲染），40ms 后重试
+				this.annMountTimer = window.setTimeout(attempt, 40);
+				return;
+			}
+			for (const a of this.bookData.annotations) {
+				void view.addAnnotation({ value: a.cfi, ...a }).catch(() => {});
+			}
+		};
+		attempt();
+	}
+
 	private scheduleSaveProgress(cfi?: string, percent?: number): void {
 		if (!this.bookData) return;
 		if (cfi) this.bookData.progress.cfi = cfi;
@@ -1331,6 +1426,10 @@ export class EpubReaderView extends FileView {
 		if (this.saveTimer !== null) {
 			window.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
+		}
+		if (this.annMountTimer !== null) {
+			window.clearTimeout(this.annMountTimer);
+			this.annMountTimer = null;
 		}
 		if (this.bookData) {
 			await this.plugin.bookStore.save(this.bookData);

@@ -8,6 +8,7 @@ import type FleurEpubPlugin from './main';
 import { HIGHLIGHT_COLORS } from './reader-view';
 import { AIService } from './ai-service';
 import { resolveSystemPrompt } from './ai-prompts';
+import { stripMarkdown, cleanAnnotationText } from './text-utils';
 import type { EpubAnnotation } from './store';
 
 export const VIEW_TYPE_SHELF = 'fleur-epub-shelf';
@@ -64,20 +65,6 @@ function pickReadableFg(bg: string): string {
 /** 空白收敛为单行（EPUB 选段常带换行） */
 function normalizeWhitespace(s: string): string {
 	return s.replace(/\s+/g, ' ').trim();
-}
-
-/** 轻量去 Markdown 标记（批注显示用纯文本，不暴露源码） */
-function stripMarkdown(s: string): string {
-	return s
-		.replace(/```[\s\S]*?```/g, (m) => m.replace(/```[a-z]*\n?|```/g, ''))
-		.replace(/`([^`]*)`/g, '$1')
-		.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-		.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-		.replace(/(\*\*|__)(.*?)\1/g, '$2')
-		.replace(/(\*|_)(.*?)\1/g, '$2')
-		.replace(/^#{1,6}\s+/gm, '')
-		.replace(/==/g, '')
-		.trim();
 }
 
 export class ShelfView extends ItemView {
@@ -485,7 +472,7 @@ export class ShelfView extends ItemView {
 		slot.empty();
 		const wrap = slot.createDiv('fleur-epub-comment-display');
 		const text = wrap.createDiv('fleur-epub-comment-text');
-		const plain = ann.comment ? stripMarkdown(normalizeWhitespace(ann.comment)) : '';
+		const plain = ann.comment ? cleanAnnotationText(normalizeWhitespace(ann.comment)) : '';
 		text.textContent = plain;
 
 		// 按「实际渲染行数」折叠：超过 3 行（与 CSS line-clamp 一致）才显示展开/收起。
@@ -601,7 +588,7 @@ export class ShelfView extends ItemView {
 		loading.createDiv({ text: 'AI 正在生成批注…', cls: 'fleur-epub-ai-loading-text' });
 		const streamEl = loading.createDiv('fleur-epub-ai-stream');
 
-		const systemPrompt = resolveSystemPrompt(this.plugin.settings.promptPreset, this.plugin.settings.customPrompt, {
+		const systemPrompt = resolveSystemPrompt(this.plugin.settings.promptPreset, this.plugin.settings.customPrompts, {
 			applyLimit: true,
 			sourceTextLength: ann.text.length,
 			baseLimit: this.plugin.settings.annotationLimit,
@@ -619,7 +606,8 @@ export class ShelfView extends ItemView {
 				streamEl.textContent += chunk;
 			},
 			() => {
-				const val = full.join('').trim();
+				// 存储前清洗：去 Markdown 标记 + 去「批注：×××」标题行（批注内容不出现原文）
+				const val = cleanAnnotationText(full.join('').trim());
 				if (!val) {
 					new Notice('AI 未返回内容');
 					this.renderAddCommentHint(slot, ann);
@@ -652,9 +640,17 @@ export class ShelfView extends ItemView {
 		}
 
 		const noteName = `${reader.getDisplayText()} - 批注笔记`;
-		const notePath = `${noteName}.md`;
+		// 导出文件夹（设置项，默认 FleurEpub；'' = vault 根目录）— fleur-pdf 同款逻辑
+		const folder = this.plugin.settings.noteFolder?.trim() || '';
+		const notePath = folder ? `${folder}/${noteName}.md` : `${noteName}.md`;
 
 		try {
+			// 确保导出文件夹存在（默认 FleurEpub，首次导出自动创建）
+			if (folder) {
+				const folderExists = await this.app.vault.adapter.exists(folder);
+				if (!folderExists) await this.app.vault.createFolder(folder);
+			}
+
 			const exists = await this.app.vault.adapter.exists(notePath);
 			if (exists) {
 				const existing = this.app.vault.getAbstractFileByPath(notePath);
@@ -680,7 +676,7 @@ export class ShelfView extends ItemView {
 						const style = ann.kind === 'wavy' ? 'wavy' : 'solid';
 						md += `<span style="text-decoration:underline;text-decoration-color:${color};text-decoration-style:${style}">${t}</span>\n\n`;
 					}
-					if (ann.comment) md += `> ${normalizeWhitespace(ann.comment)}\n\n`;
+					if (ann.comment) md += `> ${cleanAnnotationText(normalizeWhitespace(ann.comment))}\n\n`;
 					md += `---\n\n`;
 				}
 			}

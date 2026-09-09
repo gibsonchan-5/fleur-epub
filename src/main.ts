@@ -120,6 +120,21 @@ export default class FleurEpubPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		// 迁移旧版单自定义提示词（customPrompt: string）→ 三槽（customPrompts: string[]）
+		const legacy = (this.settings as unknown as Record<string, unknown>).customPrompt;
+		if (typeof legacy === 'string' && legacy.trim()) {
+			if (!(this.settings.customPrompts?.[0] ?? '').trim()) {
+				this.settings.customPrompts[0] = legacy;
+			}
+			delete (this.settings as unknown as Record<string, unknown>).customPrompt;
+		}
+		// 防止共享 DEFAULT_SETTINGS 数组引用；并补齐长度
+		const arr = Array.isArray(this.settings.customPrompts) ? this.settings.customPrompts : ['', '', ''];
+		this.settings.customPrompts = [arr[0] ?? '', arr[1] ?? '', arr[2] ?? ''];
+		// 兼容更旧的 'custom' 模式键 → custom-1
+		if ((this.settings.promptPreset as string) === 'custom') {
+			this.settings.promptPreset = 'custom-1';
+		}
 	}
 
 	async saveSettings(): Promise<void> {

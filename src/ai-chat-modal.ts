@@ -319,7 +319,7 @@ export class AIChatPanel {
       // 解释模式：跟随设置里选的「提示词模式」，但作为对话场景不设字数限制
       systemPrompt = resolveSystemPrompt(
         this.plugin.settings.promptPreset,
-        this.plugin.settings.customPrompt
+        this.plugin.settings.customPrompts
       );
       systemPrompt += '回答时使用 Markdown 格式，标题用 ## 或 ###，重点加粗。';
       const hint = resolveAskHint(this.plugin.settings.promptPreset);
@@ -663,18 +663,18 @@ export class AIChatPanel {
   private async saveNote() {
     if (!this.rawMarkdown) return;
     const file = this.plugin.app.workspace.getActiveFile();
-    if (!file) { new Notice('请先打开 PDF 文件'); return; }
+    if (!file) { new Notice('请先打开 EPUB 文件'); return; }
 
-    // 默认放 FleurReader 文件夹
-    const folder = 'FleurReader';
-    if (!this.plugin.app.vault.getAbstractFileByPath(folder)) {
+    // 导出文件夹（设置项，默认 FleurEpub；'' = vault 根目录），与批注笔记导出一致
+    const folder = this.plugin.settings.noteFolder?.trim() || '';
+    if (folder && !this.plugin.app.vault.getAbstractFileByPath(folder)) {
       await this.plugin.app.vault.createFolder(folder);
     }
 
     // 每次保存生成唯一文件名（带时间戳），允许多次保存
     const time = new Date().toLocaleString('zh-CN').replace(/[/: ]/g, '-').replace(/,/g, '');
     const noteName = `${file.basename} AI笔记 ${time}`;
-    const notePath = `${folder}/${noteName}.md`;
+    const notePath = folder ? `${folder}/${noteName}.md` : `${noteName}.md`;
 
     const noteContent = `> 导出时间：${new Date().toLocaleString('zh-CN')}
 
