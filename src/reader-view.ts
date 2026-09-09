@@ -153,6 +153,16 @@ export class EpubReaderView extends FileView {
 		this.contentEl.addEventListener('keydown', (e: KeyboardEvent) => {
 			this.handleKey(e);
 		});
+
+		// 宿主侧滚轮：短章节时 iframe 高度只有内容高（可能不足一屏），
+		// iframe 下方空白区的滚轮不会进入 iframe 文档，若不在此接住就会「卡住滚不动」。
+		// iframe 内的滚轮不会冒泡出 iframe，两侧监听天然互补、不会重复触发。
+		this.registerDomEvent(
+			this.readerEl,
+			'wheel',
+			(e: WheelEvent) => this.onReaderWheel(e),
+			{ passive: false },
+		);
 	}
 
 	/** Obsidian 打开 .epub 文件时的入口 */
@@ -240,6 +250,33 @@ export class EpubReaderView extends FileView {
 			view.addEventListener('relocate', () => {
 				this.hideSelectionToolbar();
 				this.hideAnnPopup();
+				// 滚动模式章节接力：新章节上屏后，把接力期间累积的滚轮位移一次性补滚，
+				// 让跨章滚动连成一体（这是消除「过章卡一下」的关键）
+				if (this.pendingChain) {
+					const p = this.pendingChain;
+					this.pendingChain = null;
+					if (this.chainFailTimer !== null) {
+						window.clearTimeout(this.chainFailTimer);
+						this.chainFailTimer = null;
+					}
+					const r = this.foliateView?.renderer;
+					if (r && typeof r.scrollBy === 'function' && p.acc > 0) {
+						window.setTimeout(() => {
+							try {
+								// 补滚量扣除补滚前用户已原生滚过的部分，避免把已滚动的位置往回拽（顿挫感）
+								const cur = typeof r.start === 'number' ? r.start : 0;
+								let delta = p.dir * p.acc;
+								if (p.dir === 1) delta = Math.max(0, p.acc - cur);
+								else {
+									const top = (typeof r.viewSize === 'number' ? r.viewSize : 0) - (typeof r.size === 'number' ? r.size : 0);
+									// 反向：新章锚定在末尾（start≈viewSize-size），用户可能已向上滚过
+									delta = Math.min(0, top - p.acc - cur);
+								}
+								if (delta !== 0) r.scrollBy(0, delta);
+							} catch { /* 滚动失败忽略 */ }
+						}, 60);
+					}
+				}
 			});
 
 			this.readerEl.appendChild(view);
@@ -343,10 +380,24 @@ export class EpubReaderView extends FileView {
 		const t = READER_THEMES[s.theme] ?? READER_THEMES.light;
 		const dark = s.theme === 'dark';
 		const bodyFont = s.fontFamily || '"Songti SC", "STSong", "SimSun", "Noto Serif CJK SC", Georgia, "Times New Roman", serif';
+		// 合成字重：多数中文字体（含大量 EPUB 内嵌字体）只提供「常规 / 粗」两个字面，
+		// 单靠 font-weight 时 300 与 500 都回退到 400，档位看不出差别。
+		// 这里叠加 -webkit-text-stroke 做笔画增减：细档用背景色侵蚀笔画变细，
+		// 中/粗档用文字色描边加粗（实测 Chromium 下墨色随档位单调递增）。
+		const w = s.fontWeight;
+		const synthStroke = w < 400
+			? `-webkit-text-stroke: 0.0075em ${t.bg};`
+			: w === 500
+				? `-webkit-text-stroke: 0.018em ${t.text};`
+				: w > 500
+					? `-webkit-text-stroke: 0.012em ${t.text};`
+					: '';
 		return `
 			html { font-size: ${fontSize}px; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; --overlayer-highlight-opacity: .32; --overlayer-highlight-blend-mode: ${dark ? 'screen' : 'multiply'}; }
 			body {
 				font-family: ${bodyFont};
+				font-weight: ${w};
+				${synthStroke}
 				line-height: ${s.lineHeight};
 				letter-spacing: .01em;
 				color: ${t.text};
@@ -358,7 +409,7 @@ export class EpubReaderView extends FileView {
 			p { margin: 0 0 ${s.paraSpacing}em; text-indent: 2em; }
 			/* 标题层级：章节题醒目，小节题收敛 */
 			h1, h2, h3, h4, h5, h6 {
-				font-weight: 700;
+				font-weight: ${w >= 700 ? 900 : 700};
 				line-height: 1.45;
 				text-align: left;
 				color: ${t.text};
@@ -426,6 +477,11 @@ export class EpubReaderView extends FileView {
 
 	/** 给章节文档绑定 iframe 内交互：点按翻页 + 滚轮翻页 + 键盘翻页 */
 	private bindDocEvents(doc: Document): void {
+		// 点击书内区域 → 收起外观面板（iframe 内的点击不会冒泡到主文档，
+		// 主文档上的外点关闭监听收不到，必须在这里补一层）
+		doc.addEventListener('mousedown', () => {
+			if (this.appearPanel) this.closeAppearancePanel();
+		}, true);
 		doc.addEventListener('click', (e: MouseEvent) => {
 			// 点击命中已有标注 → 交给 foliate 的 show-annotation 弹批注卡片，不翻页
 			const entry = (this.foliateView?.renderer?.getContents?.() ?? []).find((c: any) => c.doc === doc);
@@ -467,28 +523,10 @@ export class EpubReaderView extends FileView {
 
 		// 翻页模式：滚轮 / 触摸板横滑 → 翻页（微信读书行为）
 		// 滚动模式：到章末继续向下滚 → 自动接力下一章；章首向上滚 → 上一章末尾
-		//（foliate-js 每次只加载一个章节，无法真·全书连续滚动，用接力模拟连续体验）
-		doc.addEventListener('wheel', (e: WheelEvent) => {
-			if (this.plugin.settings.flow === 'paginated') {
-				e.preventDefault();
-				this.handleWheelGesture(e.deltaY >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX);
-				return;
-			}
-			const r = this.foliateView?.renderer;
-			if (!r || typeof r.viewSize !== 'number' || typeof r.end !== 'number') return;
-			if (Date.now() < this.chainNavUntil) return;
-			const atBottom = r.viewSize - r.end <= 2;
-			const atTop = r.start <= 2;
-			if (e.deltaY > 0 && atBottom) {
-				e.preventDefault();
-				this.chainNavUntil = Date.now() + 700;
-				void this.foliateView?.next();
-			} else if (e.deltaY < 0 && atTop) {
-				e.preventDefault();
-				this.chainNavUntil = Date.now() + 700;
-				void this.foliateView?.prev();
-			}
-		}, { passive: false });
+		//（foliate-js 每次只加载一个章节，无法真·全书连续滚动，用接力模拟连续体验；
+		//  接力加载窗口内的滚轮位移会被累积，新章节上屏后一次性补滚，消除「卡住」死区）
+		// 同一处理器同时服务 iframe 文档（bindDocEvents）与宿主容器（短章节空白区）。
+		doc.addEventListener('wheel', (e: WheelEvent) => this.onReaderWheel(e), { passive: false });
 
 		doc.addEventListener('keydown', (e: KeyboardEvent) => this.handleKey(e));
 
@@ -526,8 +564,49 @@ export class EpubReaderView extends FileView {
 	private wheelAcc = 0;
 	private wheelLastAt = 0;
 	private wheelCoolUntil = 0;
-	/** 滚动模式章节接力导航的冷却截止时间 */
-	private chainNavUntil = 0;
+	/** 滚动模式章节接力：进行中的接力方向与累积滚轮位移（新章节 relocate 后一次性补滚） */
+	private pendingChain: { dir: 1 | -1; acc: number } | null = null;
+	/** 接力兜底计时：relocate 迟迟不来时解除累积状态，避免滚轮永久失效 */
+	private chainFailTimer: number | null = null;
+
+	/** 滚轮处理总入口（iframe 文档与宿主容器共用，见 onOpen / bindDocEvents） */
+	private onReaderWheel(e: WheelEvent): void {
+		if (this.plugin.settings.flow === 'paginated') {
+			e.preventDefault();
+			this.handleWheelGesture(e.deltaY >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX);
+			return;
+		}
+		const r = this.foliateView?.renderer;
+		if (!r || typeof r.viewSize !== 'number' || typeof r.end !== 'number') return;
+		if (this.pendingChain) {
+			// 接力加载中：累积位移，等 relocate（新章节上屏）后补滚
+			this.pendingChain.acc = Math.min(this.pendingChain.acc + Math.abs(e.deltaY), 1600);
+			e.preventDefault();
+			return;
+		}
+		const atBottom = r.viewSize - r.end <= 2;
+		const atTop = r.start <= 2;
+		if (e.deltaY > 0 && atBottom) {
+			e.preventDefault();
+			this.startChain(1);
+			void this.foliateView?.next();
+		} else if (e.deltaY < 0 && atTop) {
+			e.preventDefault();
+			this.startChain(-1);
+			void this.foliateView?.prev();
+		}
+		// 其余情况不拦截：交给浏览器在滚动容器内原生滚动
+	}
+
+	private startChain(dir: 1 | -1): void {
+		this.pendingChain = { dir, acc: 0 };
+		if (this.chainFailTimer !== null) window.clearTimeout(this.chainFailTimer);
+		this.chainFailTimer = window.setTimeout(() => {
+			this.pendingChain = null;
+			this.chainFailTimer = null;
+		}, 4000);
+	}
+
 	private handleWheelGesture(delta: number): void {
 		const now = Date.now();
 		if (now < this.wheelCoolUntil) return;
@@ -851,6 +930,31 @@ export class EpubReaderView extends FileView {
 		});
 		renderSize();
 
+		// ── 字重：细 / 常规 / 中等 / 粗 档位 ──
+		const weightRow = mkRow('字重');
+		const WEIGHTS: Array<{ v: number; label: string }> = [
+			{ v: 300, label: '细' },
+			{ v: 400, label: '常规' },
+			{ v: 500, label: '中等' },
+			{ v: 700, label: '粗' },
+		];
+		const weightBtns: HTMLElement[] = [];
+		const renderWeight = () =>
+			weightBtns.forEach((x, i) => x.toggleClass('is-active', WEIGHTS[i].v === s.fontWeight));
+		for (const w of WEIGHTS) {
+			const b = weightRow.createEl('button', 'fleur-epub-appear-mini is-weight');
+			b.setText(w.label);
+			// 按钮文字本身按该档字重渲染，选中前即可预览效果
+			b.setCssStyles({ fontWeight: String(w.v) });
+			b.addEventListener('click', () => {
+				s.fontWeight = w.v;
+				renderWeight();
+				persist();
+			});
+			weightBtns.push(b);
+		}
+		renderWeight();
+
 		// ── 行距 / 段距 / 页边距：滑杆 + 数值 ──
 		const mkSlider = (
 			label: string, min: number, max: number, step: number,
@@ -886,9 +990,11 @@ export class EpubReaderView extends FileView {
 			s.paraSpacing = 0.85;
 			s.pageMargin = 36;
 			s.fontFamily = '';
+			s.fontWeight = 400;
 			s.theme = 'light';
 			fillFontOptions();
 			renderSize();
+			renderWeight();
 			panel.findAll('.fleur-epub-appear-swatch').forEach((d, i) => d.toggleClass('is-active', i === 0));
 			persist();
 		});
@@ -1097,6 +1203,11 @@ export class EpubReaderView extends FileView {
 	/** 是否已加载书（侧边栏判断当前是否处于书模式） */
 	isBookLoaded(): boolean {
 		return !!this.foliateView && !!this.bookData;
+	}
+
+	/** 当前已加载书的 vault 路径（侧边栏判断点击的是否为正在读的书） */
+	getLoadedFilePath(): string | null {
+		return this.loadedPath;
 	}
 
 	/** 书内目录（扁平化，含层级深度） */

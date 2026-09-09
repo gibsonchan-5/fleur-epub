@@ -21,6 +21,8 @@ export interface FleurEpubSettings {
 	paraSpacing: number;
 	/** 正文字体（CSS font-family 栈；'' = 默认宋体栈） */
 	fontFamily: string;
+	/** 正文字重：300 细 / 400 常规（默认）/ 500 中等 / 700 粗 */
+	fontWeight: number;
 	// ── AI（对齐 fleur-pdf 字段命名，便于同源配置） ──
 	/** AI 提供商（deepseek / zhipu / moonshot / qwen / doubao / minimax / openai / custom） */
 	aiProvider: string;
@@ -49,6 +51,7 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	lineHeight: 1.9,
 	paraSpacing: 0.85,
 	fontFamily: '',
+	fontWeight: 400,
 	aiProvider: 'deepseek',
 	apiKey: '',
 	baseUrl: 'https://api.deepseek.com/v1',

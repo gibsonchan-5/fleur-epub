@@ -3,6 +3,7 @@
 
 import { Events, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
 import { BookStore } from './store';
+import { CoverCache } from './cover-cache';
 import { DEFAULT_SETTINGS, FleurEpubSettingTab, type FleurEpubSettings } from './settings';
 import { EpubReaderView, VIEW_TYPE_EPUB } from './reader-view';
 import { ShelfView, VIEW_TYPE_SHELF } from './shelf-view';
@@ -10,6 +11,8 @@ import { ShelfView, VIEW_TYPE_SHELF } from './shelf-view';
 export default class FleurEpubPlugin extends Plugin {
 	settings!: FleurEpubSettings;
 	bookStore!: BookStore;
+	/** 书籍封面缓存（书架网格视图用） */
+	coverCache!: CoverCache;
 	/** 插件内事件总线：阅读器 ↔ 侧边栏联动（批注变化 / 开书） */
 	events = new Events();
 
@@ -31,6 +34,7 @@ export default class FleurEpubPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.bookStore = new BookStore(this.app, this);
+		this.coverCache = new CoverCache(this.app, this);
 
 		this.registerView(VIEW_TYPE_EPUB, (leaf: WorkspaceLeaf) =>
 			new EpubReaderView(leaf, this),
@@ -48,7 +52,7 @@ export default class FleurEpubPlugin extends Plugin {
 		}
 
 		// 左侧 ribbon：打开右侧书架
-		this.addRibbonIcon('book-open', 'FleurEPUB 书架', () => {
+		this.addRibbonIcon('library', 'FleurEPUB 书架', () => {
 			void this.openShelf();
 		});
 
@@ -102,7 +106,15 @@ export default class FleurEpubPlugin extends Plugin {
 		await workspace.getLeaf('tab').openFile(file, { active: true });
 	}
 
+	/** 通知书架视图重绘（设置变更等场景） */
+	refreshShelf(): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_SHELF)) {
+			(leaf.view as ShelfView)?.refresh();
+		}
+	}
+
 	onunload(): void {
+		this.coverCache?.dispose();
 		// Obsidian 会自动 detach 我们注册的视图 leaf；无需手工清理
 	}
 

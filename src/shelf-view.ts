@@ -3,7 +3,7 @@
 // + 悬停操作（定位 / AI 批注 / 删除）+ 批注区（内联编辑、>120 字折叠）+ 时间戳；
 // 按章节分组，支持一键导出批注笔记（Markdown）。
 
-import { ItemView, WorkspaceLeaf, Notice, debounce } from 'obsidian';
+import { ItemView, WorkspaceLeaf, Notice, TFile, debounce } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { HIGHLIGHT_COLORS } from './reader-view';
 import { AIService } from './ai-service';
@@ -83,8 +83,15 @@ function stripMarkdown(s: string): string {
 export class ShelfView extends ItemView {
 	private mode: 'shelf' | 'book' = 'shelf';
 	private tab: Tab = 'ann';
+	/**
+	 * 用户是否手动固定在书架模式（点过 back 按钮）。
+	 * 启用后即便有书在读也保持书架模式；开新书时自动解除。
+	 * 解决「shelf 错过 book-opened 事件导致一直停在书架」的问题。
+	 */
+	private manualShelf = false;
 	private headerEl!: HTMLElement;
 	private backBtn!: HTMLElement;
+	private titleEl!: HTMLElement;
 	private tabbarEl!: HTMLElement;
 	private tabBtns: Partial<Record<Tab, HTMLElement>> = {};
 	private listEl!: HTMLElement;
@@ -105,7 +112,7 @@ export class ShelfView extends ItemView {
 		return 'FleurEPUB';
 	}
 	getIcon(): string {
-		return 'book-open';
+		return 'library';
 	}
 
 	async onOpen(): Promise<void> {
@@ -119,23 +126,25 @@ export class ShelfView extends ItemView {
 		this.registerEvent(this.app.vault.on('delete', refreshShelf));
 		this.registerEvent(this.app.vault.on('rename', refreshShelf));
 
-		// 开书 → 切书内面板；批注变化 → 刷新批注 tab
+		// 开书 → 切书内面板（同时解除 manualShelf 固定，回归自动跟随）
 		this.registerEvent(
 			this.plugin.events.on('fleur-epub:book-opened', () => {
+				this.manualShelf = false;
 				this.mode = 'book';
 				this.renderAll();
 			}),
 		);
+		// 批注变化 → 刷新批注 tab
 		this.registerEvent(
 			this.plugin.events.on('fleur-epub:annotations-changed', () => {
 				if (this.mode === 'book' && this.tab === 'ann') this.renderList();
 			}),
 		);
 
-		// 已有书在读 → 直接进书内面板
-		if (this.plugin.getActiveReader()) {
-			this.mode = 'book';
-		}
+		// onOpen 时根据当前 active reader 决定初始 mode（兜底：若 onOpen 之前
+		// book-opened 已经触发过、shelf 错过了，同步到 book 模式）
+		const active = !!this.plugin.getActiveReader();
+		this.mode = active ? 'book' : 'shelf';
 		this.renderAll();
 	}
 
@@ -148,12 +157,14 @@ export class ShelfView extends ItemView {
 		this.backBtn = createSpan('fleur-epub-shelf-back');
 		this.backBtn.setText('‹ 书架');
 		this.backBtn.addEventListener('click', () => {
+			// 用户主动固定到书架模式；新开书时 book-opened 事件会解除
+			this.manualShelf = true;
 			this.mode = 'shelf';
 			this.renderAll();
 		});
 		this.headerEl.appendChild(this.backBtn);
-		const title = createSpan({ text: 'FleurEPUB', cls: 'fleur-epub-shelf-title' });
-		this.headerEl.appendChild(title);
+		this.titleEl = createSpan({ text: 'FleurEPUB', cls: 'fleur-epub-shelf-title' });
+		this.headerEl.appendChild(this.titleEl);
 		this.contentEl.appendChild(this.headerEl);
 
 		this.tabbarEl = createDiv('fleur-epub-shelf-tabs');
@@ -175,16 +186,29 @@ export class ShelfView extends ItemView {
 		this.contentEl.appendChild(this.emptyEl);
 	}
 
+	/** 供外部（设置页等）触发重绘 */
+	refresh(): void {
+		if (this.listEl) this.renderAll();
+	}
+
+	/** 封面异步就绪后的兜底重绘（防抖，避免多本书同时就绪触发风暴） */
+	private queueRedraw = debounce(() => {
+		if (this.mode === 'shelf') this.renderShelf();
+	}, 200, true);
+
 	private renderAll(): void {
-		const bookMode = this.mode === 'book' && !!this.plugin.getActiveReader();
-		if (!bookMode) this.mode = 'shelf';
+		// 同步 mode 状态：
+		// ① 没书在读 → 强制 shelf
+		// ② 用户手动固定 shelf（点过 back） → 保持 shelf
+		// ③ 否则 → 自动跟随（active reader 在则 book）
+		const active = !!this.plugin.getActiveReader();
+		if (!active) this.manualShelf = false;
+		this.mode = this.manualShelf ? 'shelf' : active ? 'book' : 'shelf';
+
 		this.backBtn.toggle(this.mode === 'book');
-		this.headerEl.getElementsByClassName('fleur-epub-shelf-title')[0]?.remove();
-		const title = createSpan({
-			text: this.mode === 'book' ? this.plugin.getActiveReader()?.getDisplayText() ?? '' : '书架',
-			cls: 'fleur-epub-shelf-title',
-		});
-		this.headerEl.appendChild(title);
+		this.titleEl.setText(
+			this.mode === 'book' ? this.plugin.getActiveReader()?.getDisplayText() ?? '' : '书架',
+		);
 		this.tabbarEl.toggle(this.mode === 'book');
 		for (const [key, btn] of Object.entries(this.tabBtns)) {
 			btn?.toggleClass('is-active', this.tab === (key as Tab));
@@ -205,27 +229,93 @@ export class ShelfView extends ItemView {
 			.filter((f) => !this.query || f.basename.toLowerCase().includes(this.query))
 			.sort((a, b) => a.basename.localeCompare(b.basename));
 
+		// 有书在读时，书架顶部显示「继续阅读」入口（用户点 back 停在书架后的回路）
+		if (!this.query) this.renderReadingEntry();
+
 		if (files.length === 0) {
 			this.emptyEl.toggle(true);
 			this.emptyEl.setText(this.query ? '没有匹配的书。' : 'vault 中还没有 EPUB 文件。\n把 .epub 放进任意文件夹后会自动出现在这里。');
 			return;
 		}
 
-		for (const file of files) {
-			const item = createDiv('fleur-epub-shelf-item');
-			const name = createSpan({ text: file.basename, cls: 'fleur-epub-shelf-item-name' });
-			const path = createSpan({ text: file.parent?.path ?? '', cls: 'fleur-epub-shelf-item-path' });
-			item.appendChild(name);
-			item.appendChild(path);
-			item.addEventListener('click', () => void this.plugin.openEpub(file));
-			this.listEl.appendChild(item);
+		for (const file of files) this.renderBookRow(file);
+	}
+
+	/** 点击书架条目的统一入口：正在读的书直接回书内面板，其余交给 openEpub */
+	private openShelfItem(file: TFile): void {
+		const reader = this.plugin.getActiveReader();
+		if (reader?.getLoadedFilePath() === file.path) {
+			// 正在读的书：显示阅读器 leaf 并切回书内面板（目录 / 批注 / 检索）
+			this.manualShelf = false;
+			this.mode = 'book';
+			this.renderAll();
+			void this.plugin.openEpub(file);
+			return;
 		}
+		void this.plugin.openEpub(file);
+	}
+
+	/** 书架顶部「继续阅读」条目（仅当有书在读且无搜索词时显示） */
+	private renderReadingEntry(): void {
+		const reader = this.plugin.getActiveReader();
+		const path = reader?.getLoadedFilePath() ?? null;
+		const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
+		if (!reader || !(file instanceof TFile)) return;
+
+		const entry = createDiv('fleur-epub-shelf-reading');
+		const label = entry.createSpan({ text: '继续阅读', cls: 'fleur-epub-shelf-reading-label' });
+		label.createSpan({ text: '›', cls: 'fleur-epub-shelf-reading-arrow' });
+		entry.createSpan({ text: reader.getDisplayText(), cls: 'fleur-epub-shelf-reading-name' });
+		entry.addEventListener('click', () => {
+			this.manualShelf = false;
+			this.mode = 'book';
+			this.renderAll();
+			void this.plugin.openEpub(file);
+		});
+		this.listEl.appendChild(entry);
+	}
+
+	/** 列表行：小封面缩略图 + 书名 + 路径 */
+	private renderBookRow(file: TFile): void {
+		const item = createDiv('fleur-epub-shelf-item');
+		const thumb = item.createDiv('fleur-epub-shelf-thumb');
+		const text = item.createDiv('fleur-epub-shelf-item-text');
+		const name = text.createSpan({ text: file.basename, cls: 'fleur-epub-shelf-item-name' });
+		const path = text.createSpan({ text: file.parent?.path ?? '', cls: 'fleur-epub-shelf-item-path' });
+
+		const cached = this.plugin.coverCache?.peek(file);
+		if (cached?.url) {
+			thumb.addClass('is-loaded');
+			thumb.style.backgroundImage = `url("${cached.url}")`;
+		}
+		if (cached) name.setText(cached.title || file.basename);
+		else {
+			void this.plugin.coverCache
+				?.get(file)
+				.then((info) => {
+					if (!item.isConnected) {
+						if (this.mode === 'shelf' && this.plugin.coverCache?.peek(file)) this.queueRedraw();
+						return;
+					}
+					if (info.url) {
+						thumb.addClass('is-loaded');
+						thumb.style.backgroundImage = `url("${info.url}")`;
+					}
+					if (info.title) name.setText(info.title);
+				})
+				.catch(() => {});
+		}
+
+		item.addEventListener('click', () => this.openShelfItem(file));
+		this.listEl.appendChild(item);
 	}
 
 	// ── 书内面板（目录 / 批注 / 检索）──
 
 	private renderList(): void {
 		this.listEl.empty();
+		// 从书架网格切回书内面板时，必须摘掉 is-grid（92px 网格列会把批注卡挤成竖条）
+		this.listEl.removeClass('is-grid');
 		this.listEl.toggle(true);
 		this.emptyEl.toggle(false);
 		if (this.tab === 'toc') this.renderTOC();

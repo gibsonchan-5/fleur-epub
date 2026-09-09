@@ -1074,8 +1074,15 @@ export class Paginator extends HTMLElement {
         for (let index = this.#index + dir; this.#canGoToIndex(index); index += dir)
             if (this.sections[index]?.linear !== 'no') return index
     }
-    async #turnPage(dir, distance) {
-        if (this.#locked) return
+    async #turnPage(dir, distance, retried = 0) {
+        // fleur-epub patch: 锁期内不丢弃翻页请求——短章节快速连滚时，上一次换章的锁
+        // （动画 + wait(100)）尚未释放，静默 return 会导致滚轮接力被吞、滚动卡死 4s。
+        // 改为等锁释放后重试（50ms 步进，上限 ~2.5s）。
+        if (this.#locked) {
+            if (retried > 50) return
+            await wait(50)
+            return this.#turnPage(dir, distance, retried + 1)
+        }
         this.#locked = true
         const prev = dir === -1
         const shouldGo = await (prev ? this.#scrollPrev(distance) : this.#scrollNext(distance))
