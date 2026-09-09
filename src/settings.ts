@@ -84,8 +84,6 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		new Setting(containerEl).setName('FleurEPUB').setHeading();
-
 		new Setting(containerEl)
 			.setName('正文字号（px）')
 			.setDesc('重新打开书籍后生效')
