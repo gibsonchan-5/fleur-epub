@@ -1,3 +1,4 @@
+/* eslint-disable obsidianmd/no-static-styles-assignment -- vendored foliate-js upstream code (https://github.com/foliate-js/foliate-js), style assignments are part of the upstream rendering core and are not plugin-authored */
 const createSVGElement = tag =>
     document.createElementNS('http://www.w3.org/2000/svg', tag)
 

@@ -1,3 +1,4 @@
+/* eslint-disable obsidianmd/no-static-styles-assignment -- vendored foliate-js upstream code (https://github.com/foliate-js/foliate-js), style assignments are part of the upstream rendering core and are not plugin-authored */
 import * as CFI from './epubcfi.js'
 import { TOCProgress, SectionProgress } from './progress.js'
 import { Overlayer } from './overlayer.js'
