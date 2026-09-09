@@ -258,17 +258,17 @@ class View {
                 afterLoad?.(doc)
 
                 // it needs to be visible for Firefox to get computed style
-                this.#iframe.style.setProperty('display', 'block')
+                this.#iframe.style.setProperty('display', `block`)
                 const { vertical, rtl } = getDirection(doc)
                 const background = getBackground(doc)
-                this.#iframe.style.setProperty('display', 'none')
+                this.#iframe.style.setProperty('display', `none`)
 
                 this.#vertical = vertical
                 this.#rtl = rtl
 
                 this.#contentRange.selectNodeContents(doc.body)
                 const layout = beforeRender?.({ vertical, rtl, background })
-                this.#iframe.style.setProperty('display', 'block')
+                this.#iframe.style.setProperty('display', `block`)
                 this.render(layout)
                 this.#observer.observe(doc.body)
 
@@ -373,14 +373,14 @@ class View {
             const contentSize = contentStart + contentRect[side]
             const pageCount = Math.ceil(contentSize / this.#size)
             const expandedSize = pageCount * this.#size
-            this.#element.style.setProperty('padding', '0')
+            this.#element.style.setProperty('padding', `0`)
             this.#iframe.style[side] = `${expandedSize}px`
             this.#element.style[side] = `${expandedSize + this.#size * 2}px`
-            this.#iframe.style[otherSide] = '100%'
-            this.#element.style[otherSide] = '100%'
+            this.#iframe.style[otherSide] = `100%`
+            this.#element.style[otherSide] = `100%`
             documentElement.style[side] = `${this.#size}px`
             if (this.#overlayer) {
-                this.#overlayer.element.style.setProperty('margin', '0')
+                this.#overlayer.element.style.setProperty('margin', `0`)
                 this.#overlayer.element.style.setProperty('left', this.#vertical ? '0' : `${this.#size}px`)
                 this.#overlayer.element.style.setProperty('top', this.#vertical ? `${this.#size}px` : '0')
                 this.#overlayer.element.style[side] = `${expandedSize}px`
@@ -396,12 +396,12 @@ class View {
             this.#element.style.setProperty('padding', padding)
             this.#iframe.style[side] = `${expandedSize}px`
             this.#element.style[side] = `${expandedSize}px`
-            this.#iframe.style[otherSide] = '100%'
-            this.#element.style[otherSide] = '100%'
+            this.#iframe.style[otherSide] = `100%`
+            this.#element.style[otherSide] = `100%`
             if (this.#overlayer) {
                 this.#overlayer.element.style.setProperty('margin', padding)
-                this.#overlayer.element.style.setProperty('left', '0')
-                this.#overlayer.element.style.setProperty('top', '0')
+                this.#overlayer.element.style.setProperty('left', `0`)
+                this.#overlayer.element.style.setProperty('top', `0`)
                 this.#overlayer.element.style[side] = `${expandedSize}px`
                 this.#overlayer.redraw()
             }
@@ -728,7 +728,7 @@ export class Paginator extends HTMLElement {
         if (flow === 'scrolled') {
             // FIXME: vertical-rl only, not -lr
             this.setAttribute('dir', vertical ? 'rtl' : 'ltr')
-            this.#top.style.setProperty('padding', '0')
+            this.#top.style.setProperty('padding', `0`)
             const columnWidth = maxInlineSize
 
             this.heads = null

@@ -153,7 +153,7 @@ export class FixedLayout extends HTMLElement {
                 marginBlock: 'auto',
             })
             if (portrait && frame !== target) {
-                element.style.setProperty('display', 'none')
+                element.style.setProperty('display', `none`)
             }
         }
         if (this.#center) {

@@ -127,8 +127,8 @@ export class Overlayer {
         const { color = 'red' } = options
         const g = createSVGElement('g')
         g.setAttribute('fill', color)
-        g.style.setProperty('opacity', 'var(--overlayer-highlight-opacity, .3)')
-        g.style.setProperty('mix-blend-mode', 'var(--overlayer-highlight-blend-mode, normal)')
+        g.style.setProperty('opacity', `var(--overlayer-highlight-opacity, .3)`)
+        g.style.setProperty('mix-blend-mode', `var(--overlayer-highlight-blend-mode, normal)`)
         for (const { left, top, height, width } of rects) {
             const el = createSVGElement('rect')
             el.setAttribute('x', left)

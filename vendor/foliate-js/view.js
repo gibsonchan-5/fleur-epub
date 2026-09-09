@@ -125,7 +125,7 @@ class CursorAutohider {
         return new CursorAutohider(el, this.#check, this.#state)
     }
     hide() {
-        this.#el.style.setProperty('cursor', 'none')
+        this.#el.style.setProperty('cursor', `none`)
         this.#state.hidden = true
     }
     show() {
