@@ -1,4 +1,3 @@
-/* eslint-disable obsidianmd/no-static-styles-assignment -- vendored foliate-js upstream code (https://github.com/foliate-js/foliate-js), style assignments are part of the upstream rendering core and are not plugin-authored */
 const createSVGElement = tag =>
     document.createElementNS('http://www.w3.org/2000/svg', tag)
 
@@ -128,8 +127,8 @@ export class Overlayer {
         const { color = 'red' } = options
         const g = createSVGElement('g')
         g.setAttribute('fill', color)
-        g.style.opacity = 'var(--overlayer-highlight-opacity, .3)'
-        g.style.mixBlendMode = 'var(--overlayer-highlight-blend-mode, normal)'
+        g.style.setProperty('opacity', 'var(--overlayer-highlight-opacity, .3)')
+        g.style.setProperty('mix-blend-mode', 'var(--overlayer-highlight-blend-mode, normal)')
         for (const { left, top, height, width } of rects) {
             const el = createSVGElement('rect')
             el.setAttribute('x', left)
