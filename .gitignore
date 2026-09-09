@@ -1,0 +1,10 @@
+# dev
+node_modules/
+npm-debug.log*
+
+# 用户数据
+data.json
+
+# 测试产物
+test-book.epub
+test-harness.html

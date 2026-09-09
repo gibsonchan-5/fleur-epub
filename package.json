@@ -1,0 +1,22 @@
+{
+  "name": "fleur-epub",
+  "version": "0.1.0",
+  "description": "Read EPUB books with highlights, wavy underlines, comments, full-text search and AI annotations — the FleurPDF experience for e-books.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc -noEmit"
+  },
+  "keywords": [],
+  "author": "gibsonchan-5",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.24.2",
+    "obsidian": "^1.7.2",
+    "tslib": "^2.8.1",
+    "typescript": "^5.7.2"
+  }
+}
