@@ -39,6 +39,8 @@ export interface BookData {
 	book: BookMeta;
 	progress: BookProgress;
 	annotations: EpubAnnotation[];
+	/** 段落对照翻译缓存：key = 段落文本 FNV 哈希（translator.ts） */
+	translations?: Record<string, string>;
 }
 
 /** FNV-1a 32bit 哈希（纯前端可用，无 Node 依赖） */

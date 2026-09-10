@@ -212,7 +212,8 @@ export class ShelfView extends ItemView {
 		this.emptyEl.toggle(false);
 		const files = this.app.vault
 			.getFiles()
-			.filter((f) => f.extension === 'epub')
+			// Windows 文件扩展名大小写不保真（.EPUB / .Epub 常见），统一小写比较
+			.filter((f) => f.extension.toLowerCase() === 'epub')
 			.filter((f) => !this.query || f.basename.toLowerCase().includes(this.query))
 			.sort((a, b) => a.basename.localeCompare(b.basename));
 

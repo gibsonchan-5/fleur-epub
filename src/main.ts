@@ -1,7 +1,7 @@
 // FleurEPUB — Obsidian EPUB 阅读与批注插件
 // M1：骨架 + foliate-js 渲染 + 进度记忆
 
-import { Events, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
+import { Events, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
 import { BookStore } from './store';
 import { CoverCache } from './cover-cache';
 import { DEFAULT_SETTINGS, FleurEpubSettingTab, type FleurEpubSettings } from './settings';
@@ -48,7 +48,16 @@ export default class FleurEpubPlugin extends Plugin {
 			// 接管 .epub 扩展名：文件浏览器点击即用本插件的视图打开
 			this.registerExtensions(['epub'], VIEW_TYPE_EPUB);
 		} catch (e) {
+			// 被其他插件占用时 openFile 会回退「系统默认程序打开」（Windows 上 .epub 常关联 WPS），
+			// 书架点击有强制视图兜底（openInReader），这里给出可见提示帮助排查文件列表入口
 			console.warn('[FleurEPUB] epub 扩展名已被其他插件占用', e);
+			new Notice('FleurEPUB：.epub 扩展名已被其他插件占用，文件列表点击可能无法用内置阅读器打开', 6000);
+		}
+		try {
+			// 部分 Windows 用户的文件扩展名是大写 .EPUB（注册表按原样匹配，需单独接管）
+			this.registerExtensions(['EPUB'], VIEW_TYPE_EPUB);
+		} catch {
+			/* 已注册 / 已占用：忽略 */
 		}
 
 		// 左侧 ribbon：打开右侧书架
@@ -69,7 +78,7 @@ export default class FleurEpubPlugin extends Plugin {
 			name: '打开当前 EPUB 文件',
 			checkCallback: (checking: boolean) => {
 				const file = this.app.workspace.getActiveFile();
-				if (!file || file.extension !== 'epub') return false;
+				if (!file || file.extension.toLowerCase() !== 'epub') return false;
 				if (!checking) void this.openEpub(file);
 				return true;
 			},
@@ -100,10 +109,28 @@ export default class FleurEpubPlugin extends Plugin {
 				await workspace.revealLeaf(leaf);
 				return;
 			}
-			await leaf.openFile(file, { active: true });
+			await this.openInReader(leaf, file);
 			return;
 		}
-		await workspace.getLeaf('tab').openFile(file, { active: true });
+		await this.openInReader(workspace.getLeaf('tab'), file);
+	}
+
+	/**
+	 * 在指定 leaf 用内置阅读器打开书。
+	 *
+	 * ⚠️ 必须校验视图类型：leaf.openFile 依赖「扩展名已接管」——.epub 注册被其他插件
+	 * 占用、或文件扩展名是大写 .EPUB 时，Obsidian 会回退到「系统默认程序打开」，
+	 * Windows 上 .epub 常关联 WPS → 表现为「点书架弹出 WPS」。
+	 * 打开后视图不是本插件的阅读器，就强制 setViewState 切换（不再依赖扩展名注册）。
+	 */
+	private async openInReader(leaf: WorkspaceLeaf, file: TFile): Promise<void> {
+		await leaf.openFile(file, { active: true });
+		if ((leaf.view as EpubReaderView).getViewType() !== VIEW_TYPE_EPUB) {
+			await leaf.setViewState(
+				{ type: VIEW_TYPE_EPUB, state: { file: file.path } },
+				{ active: true },
+			);
+		}
 	}
 
 	/** 通知书架视图重绘（设置变更等场景） */

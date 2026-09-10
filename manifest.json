@@ -1,9 +1,9 @@
 {
   "id": "fleur-epub",
   "name": "FleurEPUB",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "minAppVersion": "1.7.2",
-  "description": "Read EPUB books with highlights, wavy underlines, comments, full-text search and AI annotations — the FleurPDF experience for e-books.",
+  "description": "Read EPUB books with highlights, wavy underlines, comments, full-text search, AI annotations and paragraph translation — the FleurPDF experience for e-books.",
   "author": "gibsonchan-5",
   "isDesktopOnly": false
 }

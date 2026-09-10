@@ -11,6 +11,7 @@ import { computeFingerprint, type BookData, type BookMeta, type EpubAnnotation, 
 import { Overlayer } from '../vendor/foliate-js/overlayer.js';
 import { AIChatPanel } from './ai-chat-modal';
 import { cleanAnnotationText } from './text-utils';
+import { TranslationEngine, findParagraphEl, collectParagraphs } from './translator';
 import type { ReaderTheme } from './settings';
 import '../vendor/foliate-js/view.js';
 
@@ -104,6 +105,9 @@ export class EpubReaderView extends FileView {
 	private annPopupClose: (() => void) | null = null;
 	private currentSelDoc: Document | null = null;
 	private selSnapshot = '';
+	// ── 段落对照翻译 ──
+	private translator: TranslationEngine | null = null;
+	private translateBtn: HTMLElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, private plugin: FleurEpubPlugin) {
 		super(leaf);
@@ -140,6 +144,16 @@ export class EpubReaderView extends FileView {
 
 		this.percentEl = createSpan('fleur-epub-percent');
 
+		// 对照翻译开关（与 Aa 并置）：外语→现代中文 / 文言→白话，AI 自动识别语言
+		const trBtn = createSpan('fleur-epub-bar-btn fleur-epub-bar-btn-translate');
+		trBtn.setText('译');
+		// 不设 aria-label：Obsidian 会把它渲染成悬浮 tooltip，干扰顶栏观感
+		trBtn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			void this.toggleChapterTranslation();
+		});
+		this.translateBtn = trBtn;
+
 		// Aa 阅读外观按钮（微信读书式：字号/行距/段距/页边距/背景主题/字体）
 		const aaBtn = createSpan('fleur-epub-bar-btn');
 		aaBtn.setText('Aa');
@@ -149,6 +163,7 @@ export class EpubReaderView extends FileView {
 			this.toggleAppearancePanel(aaBtn);
 		});
 
+		right.appendChild(trBtn);
 		right.appendChild(aaBtn);
 		right.appendChild(seg);
 		right.appendChild(this.percentEl);
@@ -221,6 +236,10 @@ export class EpubReaderView extends FileView {
 					// 清掉书内自带的 title 属性：许多 EPUB 在正文节点上带
 					// pagenumber 之类的 title，悬停会弹原生灰条提示，干扰阅读
 					doc.querySelectorAll('[title]').forEach((el) => el.removeAttribute('title'));
+				// 对照翻译开启时：新章节按「视口优先」续翻（最大单元仍是本章）
+				if (this.translator?.isActive() && doc.body?.textContent?.trim()) {
+					this.translator.scheduleFocus(doc);
+				}
 				}
 				if (this.bookData) {
 					// 注意时序：foliate 的 load 事件在 create-overlayer / #view 切换之前派发，
@@ -257,10 +276,11 @@ export class EpubReaderView extends FileView {
 				this.showAnnotationPopup(ann, host.x, host.y);
 			});
 
-			// 翻页 / 滚动时收起全部浮层
+			// 翻页 / 滚动时收起全部浮层，并按新视口重排翻译优先级（节流）
 			view.addEventListener('relocate', () => {
 				this.hideSelectionToolbar();
 				this.hideAnnPopup();
+				this.translator?.scheduleFocus();
 			});
 
 			this.readerEl.appendChild(view);
@@ -271,6 +291,9 @@ export class EpubReaderView extends FileView {
 
 			// 排版：衬线正文 + 标题层级 + 段落节奏（微信读书 / Apple Books 风格）
 			this.applyReaderStyles();
+
+			// 段落对照翻译引擎（章节粒度 + 缓存，详见 translator.ts）
+			this.initTranslator();
 
 			// 元信息 → 书指纹 → 恢复进度
 			const meta: BookMeta = {
@@ -314,6 +337,116 @@ export class EpubReaderView extends FileView {
 				.createDiv('fleur-epub-error')
 				.setText('无法打开此 EPUB 文件。可能文件损坏或格式不受支持。');
 		}
+	}
+
+	// ════════ 段落对照翻译（微信读书式，视口优先 + 渐进推进 + 缓存） ════════
+
+	private initTranslator(): void {
+		this.translator = new TranslationEngine(this.plugin, {
+			getData: () => this.bookData,
+			save: () => this.saveBookData(),
+			onNotice: (msg, timeout) => new Notice(msg, timeout ?? 2400),
+		});
+		this.translator.docsProvider = () =>
+			(this.foliateView?.renderer?.getContents?.() ?? [])
+				.map((c: { doc?: Document }) => c.doc)
+				.filter((d: Document | undefined): d is Document => !!d && !!d.body);
+		this.translator.currentDocProvider = () => this.currentChapterDoc();
+		// 阅读视口 = paginator 元素的矩形（宿主坐标），用于判定「当前正在读的那一屏」
+		this.translator.viewportProvider = () => {
+			const el = this.foliateView?.renderer as HTMLElement | undefined;
+			const r = el?.getBoundingClientRect?.();
+			if (!r || !r.height) return null;
+			return { top: r.top, bottom: r.bottom, left: r.left, right: r.right };
+		};
+		this.renderTranslateState();
+	}
+
+	/** 当前章节文档（foliate 预载的相邻章节不算） */
+	private currentChapterDoc(): Document | null {
+		const view = this.foliateView as any;
+		const contents = view?.renderer?.getContents?.() ?? [];
+		const index = view?.lastLocation?.index;
+		if (typeof index === 'number') {
+			const hit = contents.find((c: { index?: number }) => c.index === index);
+			if (hit?.doc) return hit.doc as Document;
+		}
+		return (contents[0]?.doc as Document | undefined) ?? null;
+	}
+
+	/**
+	 * 对照翻译的进度反馈策略：完全静默。
+	 * 译文逐段出现本身就是进度；开启/失败/整章跳过走 Notice。
+	 * （原常驻进度胶囊在连续滚动时会反复弹收、闪烁干扰阅读，已移除。）
+	 */
+
+	/** 顶栏「译」：对照翻译开关（当前页优先嵌入，其余后台逐章续翻） */
+	private async toggleChapterTranslation(): Promise<void> {
+		if (!this.foliateView) {
+			new Notice('请先打开一本 EPUB', 1800);
+			return;
+		}
+		if (!this.translator) this.initTranslator();
+		const engine = this.translator;
+		if (!engine) return;
+
+		if (engine.isActive()) {
+			engine.setActive(false);
+			this.renderTranslateState();
+			new Notice('已关闭对照翻译', 1400);
+			return;
+		}
+
+		if (!this.plugin.settings.apiKey) {
+			new Notice('请先在设置中配置 AI API Key，再使用对照翻译', 3200);
+			return;
+		}
+
+		const doc = this.currentChapterDoc();
+		if (!doc || !collectParagraphs(doc).length) {
+			new Notice('本章没有需要对照翻译的段落（翻到下一章会自动续翻）', 2600);
+			return;
+		}
+
+		engine.setActive(true);
+		this.renderTranslateState();
+		engine.focus(doc);
+		new Notice('已开启对照翻译：当前页优先，其余后台续翻', 2000);
+	}
+
+	/** 同步「译」按钮的开启态 */
+	private renderTranslateState(): void {
+		const active = this.translator?.isActive() ?? false;
+		if (!this.translateBtn) return;
+		this.translateBtn.toggleClass('is-active', active);
+		this.translateBtn.removeAttribute('aria-label');
+	}
+
+	/** 选区工具条「译」：翻译选区所在段落（整段对照，命中缓存零消耗） */
+	private translateSelectionParagraph(doc: Document): void {
+		const sel = doc.getSelection();
+		if (!sel || sel.rangeCount === 0) return;
+		const range = sel.getRangeAt(0);
+		const startEl = range.startContainer instanceof Element
+			? range.startContainer
+			: range.startContainer.parentElement;
+		const p = findParagraphEl(startEl ?? null);
+		if (!p) {
+			new Notice('未找到可翻译的段落', 1800);
+			return;
+		}
+		if (!this.translator) this.initTranslator();
+		const engine = this.translator;
+		if (!engine) return;
+		if (!this.plugin.settings.apiKey) {
+			new Notice('请先在设置中配置 AI API Key，再使用对照翻译', 3200);
+			return;
+		}
+		void engine.translateParagraphEl(p).then((r) => {
+			if (r === 'ok') new Notice('已嵌入译文', 1500);
+			else if (r === 'fail') new Notice(`翻译失败：${engine.getLastError() ?? '请检查 AI 设置与网络'}`, 4000);
+			else new Notice('该段无需翻译（已是中文或与原文本相同）', 2000);
+		});
 	}
 
 	/** 应用阅读模式（滚动 / 翻页）：设置 renderer 属性并刷新分段控件状态 */
@@ -442,6 +575,17 @@ export class EpubReaderView extends FileView {
 			}
 			/* 链接与强调 */
 			a { color: ${t.link}; text-decoration: none; }
+			/* 段落对照翻译：原文段落尾部嵌入的译文块（微信读书式），
+			   追加于段落内部末尾，不影响既有 CFI 锚定；
+			   排版与正文保持一致（不加边杠 / 不缩进 / 不淡化） */
+			.fleur-translation {
+				display: block;
+				margin: 0;
+			}
+			/* 文言→白话的译文：灰显「退后半步」（字号不变，不打断版式节奏） */
+			.fleur-translation-classical {
+				color: ${t.muted};
+			}
 			em, i { font-style: italic; }
 			strong, b { font-weight: 700; }
 			/* 代码 */
@@ -708,6 +852,13 @@ export class EpubReaderView extends FileView {
 	private showSelectionToolbar(doc: Document, eraseTargets: EpubAnnotation[] = []): void {
 		const sel = doc.getSelection();
 		if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+		const range0 = sel.getRangeAt(0);
+		// 选区落在译文块上 → 不弹工具条：译文节点重开书后不存在，
+		// 对其创建的 CFI 会失效（只允许对原文标注）
+		const startEl = range0.startContainer instanceof Element
+			? range0.startContainer
+			: range0.startContainer.parentElement;
+		if (startEl?.closest('.fleur-translation')) return;
 		const text = sel.toString();
 		if (!text.trim()) return;
 		this.hideAnnPopup();
@@ -765,8 +916,8 @@ export class EpubReaderView extends FileView {
 		mkBtn('AI', 'AI 解释', () => {
 			new AIChatPanel(this.plugin, this.selSnapshot, 'explain').open(host.x, host.y);
 		});
-		mkBtn('译', '翻译', () => {
-			new AIChatPanel(this.plugin, this.selSnapshot, 'translate').open(host.x, host.y);
+		mkBtn('译', '翻译本段（原文下方嵌入译文）', () => {
+			this.translateSelectionParagraph(doc);
 		});
 
 		// 右键处命中已有标注 → 工具条附加擦除项（对齐 fleur-pdf：清除项进右键菜单，不直接擦除）
@@ -1000,6 +1151,8 @@ export class EpubReaderView extends FileView {
 		// 左右边距：独立于对称页边距的额外偏移，可做不对称排版（如左 70 / 右 40）
 		mkSlider('左边距', 0, 80, 4, () => s.marginLeft ?? 0, (v) => (s.marginLeft = v), (v) => `${v}px`);
 		mkSlider('右边距', 0, 80, 4, () => s.marginRight ?? 0, (v) => (s.marginRight = v), (v) => `${v}px`);
+
+		// 对照翻译开关已移至顶栏（与 Aa 并置），此处不再重复提供
 
 		// ── 重置 ──
 		const resetRow = panel.createDiv('fleur-epub-appear-row is-reset');
@@ -1427,6 +1580,10 @@ export class EpubReaderView extends FileView {
 			window.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
+		// 停掉翻译引擎（中止在途请求）
+		this.translator?.setActive(false);
+		this.translator = null;
+		this.renderTranslateState();
 		if (this.annMountTimer !== null) {
 			window.clearTimeout(this.annMountTimer);
 			this.annMountTimer = null;

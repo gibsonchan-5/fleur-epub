@@ -134,6 +134,14 @@
 	color: var(--fleur-epub-text);
 	background: var(--fleur-epub-btn-hover);
 }
+/* 顶栏对照翻译「译」：开启态高亮 */
+.fleur-epub-bar-btn.is-active {
+	color: var(--fleur-epub-accent);
+	background: var(--fleur-epub-btn-hover);
+}
+.fleur-epub-bar-btn-translate {
+	font-family: var(--font-interface);
+}
 
 .fleur-epub-percent {
 	color: var(--fleur-epub-text-muted);
@@ -810,13 +818,6 @@
   margin-bottom: 4px;
 }
 
-.fleur-ai-loading {
-  padding: 14px 0;
-  font-size: 13px;
-  color: var(--text-muted);
-  font-style: italic;
-}
-
 .fleur-ai-response {
   font-size: 14px;
   line-height: 1.75;
@@ -1380,3 +1381,5 @@ button.fleur-epub-setting-test-success {
 button.fleur-epub-setting-test-error {
 	color: var(--text-error) !important;
 }
+
+/* ── 段落对照翻译：进度胶囊（宿主侧） ── */

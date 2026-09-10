@@ -385,11 +385,6 @@ export class AIChatPanel {
     const turnContainer = this.bodyEl!.createDiv();
     turnContainer.addClass('fleur-ai-turn');
 
-    // 加载提示
-    const loading = turnContainer.createDiv();
-    loading.addClass('fleur-ai-loading');
-    loading.setText('正在分析…');
-
     // AI 回答区
     const responseEl = turnContainer.createDiv();
     responseEl.addClass('fleur-ai-response');
@@ -405,7 +400,6 @@ export class AIChatPanel {
       content: m.content
     }));
 
-    loading.addClass('is-hidden');
     responseEl.addClass('is-visible');
 
     // 流式过程中 onChunk 回调
