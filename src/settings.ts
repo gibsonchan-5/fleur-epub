@@ -5,6 +5,9 @@ import { PROMPT_PRESETS, getPromptPreset, getPresetPreview, isCustomPresetKey, A
 /** 阅读背景主题：浅色 / 深色 / 暖黄 / 豆绿（微信读书式四色） */
 export type ReaderTheme = 'light' | 'dark' | 'sepia' | 'green';
 
+/** 对照翻译引擎：AI（大模型，支持文言→白话）/ 微软机翻（免密钥、快、零 token） */
+export type TranslationEngineKind = 'ai' | 'microsoft';
+
 export interface FleurEpubSettings {
 	fontSize: number;
 	flow: 'scrolled' | 'paginated';
@@ -28,6 +31,8 @@ export interface FleurEpubSettings {
 	/** 正文字重：300 细 / 400 常规（默认）/ 500 中等 / 700 粗 */
 	fontWeight: number;
 	// ── AI（对齐 fleur-pdf 字段命名，便于同源配置） ──
+	/** 对照翻译引擎（ai = 走下方 AI 配置；microsoft = 微软机翻，免密钥） */
+	translationEngine: TranslationEngineKind;
 	/** AI 提供商（deepseek / zhipu / moonshot / qwen / doubao / minimax / openai / custom） */
 	aiProvider: string;
 	apiKey: string;
@@ -59,6 +64,7 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	paraSpacing: 0.85,
 	fontFamily: '',
 	fontWeight: 400,
+	translationEngine: 'ai',
 	aiProvider: 'deepseek',
 	apiKey: '',
 	baseUrl: 'https://api.deepseek.com/v1',
@@ -177,6 +183,23 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				});
 			});
+
+		// ── 对照翻译（引擎选择；微软机翻免密钥，AI 走下方 AI 配置） ──
+		new Setting(containerEl).setName('对照翻译').setHeading();
+
+		new Setting(containerEl)
+			.setName('翻译引擎')
+			.setDesc('微软机翻：免密钥、速度快、不消耗 AI 额度，但不支持文言文→白话（文言段落会保持原样）；AI 翻译：质量更高且支持文言文，需在下方配置 API Key')
+			.addDropdown((drop) =>
+				drop
+					.addOption('ai', 'AI 翻译（支持文言文）')
+					.addOption('microsoft', '微软机翻（免费快速）')
+					.setValue(this.plugin.settings.translationEngine ?? 'ai')
+					.onChange(async (v) => {
+						this.plugin.settings.translationEngine = v === 'microsoft' ? 'microsoft' : 'ai';
+						await this.plugin.saveSettings();
+					}),
+			);
 
 		// ── AI 配置（与 fleur-pdf 对齐：多提供商 + 提示词详情预览 + 测试连接） ──
 		new Setting(containerEl).setName('AI 配置').setHeading();

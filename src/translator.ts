@@ -24,6 +24,7 @@
 import { stripMarkdown } from './text-utils';
 import { hashString } from './store';
 import { AIService } from './ai-service';
+import { translateBatchMicrosoft } from './mt-service';
 import type FleurEpubPlugin from './main';
 
 const TRANSLATION_CLASS = 'fleur-translation';
@@ -31,8 +32,10 @@ const TRANSLATION_CLASS = 'fleur-translation';
 const CLASSICAL_CLASS = 'fleur-translation-classical';
 /** 段落最小有效字符数（过短的行号、空白段不翻） */
 const MIN_PARA_LEN = 4;
-/** 单次请求合并的段落数（首屏通常 1 个请求即可完成） */
+/** 单次请求合并的段落数（AI 分隔符协议，首屏通常 1 个请求即可完成） */
 const BATCH_SIZE = 6;
+/** 微软机翻单批段数（原生数组批量接口，一次可带几十段） */
+const MT_BATCH_SIZE = 50;
 /** 同时在飞的请求数（对上游接口友好） */
 const CONCURRENCY = 2;
 /** 视口判定松弛量（px）：上下各放宽一点，让临界段落一起翻 */
@@ -240,6 +243,16 @@ export class TranslationEngine {
 		return this.active;
 	}
 
+	/** 当前翻译引擎（设置里选择；microsoft = 微软机翻，免密钥） */
+	private useMicrosoft(): boolean {
+		return (this.plugin.settings.translationEngine ?? 'ai') === 'microsoft';
+	}
+
+	/** 单批段数上限：机翻走原生数组批量接口，可以带更多段 */
+	private batchSize(): number {
+		return this.useMicrosoft() ? MT_BATCH_SIZE : BATCH_SIZE;
+	}
+
 	getLastError(): string | null {
 		return this.lastError;
 	}
@@ -400,8 +413,9 @@ export class TranslationEngine {
 		all.sort((a, b) => (a.prio - b.prio) || (a.seq - b.seq));
 		const head = all[0];
 		const batch: QueueItem[] = [head];
+		const cap = this.batchSize();
 		for (const it of all) {
-			if (batch.length >= BATCH_SIZE) break;
+			if (batch.length >= cap) break;
 			if (it === head) continue;
 			if (it.prio === head.prio && it.doc === head.doc) batch.push(it);
 		}
@@ -470,7 +484,7 @@ export class TranslationEngine {
 	 * 自动重锚（paginator `onExpand → #scrollToAnchor(#anchor)`），把阅读位置钉住；
 	 * 再叠加一层像素补偿会变成重复补偿（实测把位移从 135px 放大到 780px）。
 	 */
-	private commit(items: QueueItem[], texts: string[]): void {
+	private commit(items: QueueItem[], texts: (string | null)[]): void {
 		let inserted = 0;
 
 		for (let i = 0; i < items.length; i++) {
@@ -633,8 +647,14 @@ export class TranslationEngine {
 
 	// ──────────────── 请求 ────────────────
 
-	/** 单段翻译请求：复用 AI 服务的流式通道，累积为完整文本 */
+	/** 单段翻译请求：机翻走微软批量接口（单元素数组），AI 走流式通道 */
 	private async requestTranslation(source: string): Promise<{ text: string | null; error: string | null }> {
+		if (this.useMicrosoft()) {
+			const r = await translateBatchMicrosoft([source]);
+			if (r.error) return { text: null, error: r.error };
+			// detectedLanguage 为 zh（原文即中文）→ text 为 null → 调用方判 unchanged
+			return { text: r.items[0]?.text ?? null, error: null };
+		}
 		const controller = new AbortController();
 		this.controllers.add(controller);
 		let error: string | null = null;
@@ -665,10 +685,17 @@ export class TranslationEngine {
 	}
 
 	/**
-	 * 批量翻译请求：多段用分隔符合并成一次往返。
-	 * 返回 null 表示「模型输出无法可靠切分」→ 调用方退回逐段请求。
+	 * 批量翻译请求。
+	 * 微软机翻：原生数组批量接口，逐段对齐返回（中文段 text=null → unchanged）；
+	 * AI：多段用分隔符合并成一次往返。
+	 * 返回 null 表示「无法可靠切分」→ 调用方退回逐段请求（仅 AI 路径）。
 	 */
-	private async requestBatch(sources: string[]): Promise<{ texts: string[] | null; error: string | null }> {
+	private async requestBatch(sources: string[]): Promise<{ texts: (string | null)[] | null; error: string | null }> {
+		if (this.useMicrosoft()) {
+			const r = await translateBatchMicrosoft(sources);
+			if (r.error) return { texts: null, error: r.error };
+			return { texts: r.items.map((it) => it.text), error: null };
+		}
 		const controller = new AbortController();
 		this.controllers.add(controller);
 		let error: string | null = null;

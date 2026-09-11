@@ -397,8 +397,10 @@ export class EpubReaderView extends FileView {
 			return;
 		}
 
-		if (!this.plugin.settings.apiKey) {
-			new Notice('请先在设置中配置 AI API Key，再使用对照翻译', 3200);
+		// AI 引擎需要密钥；微软机翻免密钥（无 Key 的用户也可用对照翻译）
+		const useMt = (this.plugin.settings.translationEngine ?? 'ai') === 'microsoft';
+		if (!useMt && !this.plugin.settings.apiKey) {
+			new Notice('当前引擎为 AI 翻译，请先在设置中配置 API Key，或切换为微软机翻', 3600);
 			return;
 		}
 
@@ -411,7 +413,12 @@ export class EpubReaderView extends FileView {
 		engine.setActive(true);
 		this.renderTranslateState();
 		engine.focus(doc);
-		new Notice('已开启对照翻译：当前页优先，其余后台续翻', 2000);
+		new Notice(
+			useMt
+				? '已开启对照翻译（微软机翻）：当前页优先，其余后台续翻；机翻不支持文言文→白话'
+				: '已开启对照翻译：当前页优先，其余后台续翻',
+			2600,
+		);
 	}
 
 	/** 同步「译」按钮的开启态 */
@@ -438,8 +445,10 @@ export class EpubReaderView extends FileView {
 		if (!this.translator) this.initTranslator();
 		const engine = this.translator;
 		if (!engine) return;
-		if (!this.plugin.settings.apiKey) {
-			new Notice('请先在设置中配置 AI API Key，再使用对照翻译', 3200);
+		// AI 引擎需要密钥；微软机翻免密钥
+		const useMt = (this.plugin.settings.translationEngine ?? 'ai') === 'microsoft';
+		if (!useMt && !this.plugin.settings.apiKey) {
+			new Notice('当前引擎为 AI 翻译，请先在设置中配置 API Key，或切换为微软机翻', 3600);
 			return;
 		}
 		void engine.translateParagraphEl(p).then((r) => {
