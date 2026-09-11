@@ -474,19 +474,16 @@
 	color: var(--text-normal);
 }
 
-/* ── 批注卡片：标题栏可拖拽、右下角可缩放（窗口式便签，交互对齐 FleurAnnotation） ── */
+/* ── 批注编辑弹窗：fleurPDF Comment Dialog 式（引用块 + 注释标签 + 输入 + 按钮） ──
+   高度自适应内容，按钮行永远可见；标题栏可拖拽（位置记忆）、右下角手柄只调宽度 */
 .fleur-epub-annpop {
 	position: fixed;
 	z-index: 10010;
-	/* 固定默认宽度（窄），长批注自动换行、超出滚动，不随内容撑宽；
-	   需要更宽时拖右下角缩放手柄（上限仍为 max-width） */
-	width: 300px;
-	max-width: min(640px, calc(100vw - 16px));
-	max-height: calc(100vh - 16px);
+	/* 固定默认宽度；需要更宽时拖右下角手柄（记忆也只记宽度） */
+	width: 340px;
 	min-width: 260px;
-	min-height: 120px;
+	max-width: min(640px, calc(100vw - 16px));
 	padding: 0;
-	overflow: hidden;
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 10px;
@@ -563,46 +560,53 @@
 	border-color: var(--text-faint);
 }
 
-/* 批注内容视图：正常字体、纯文本展示（不暴露 Markdown 源码；对齐 fleur-annotation tooltip） */
+/* 正文区：自然高度撑开（不滚动、不压缩按钮行） */
 .fleur-epub-annpop-body {
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
 	padding: 10px 14px 12px;
-	overflow-y: auto;
-	min-height: 0;
-	flex: 1 1 auto;
 }
-.fleur-epub-annpop-comment {
+
+/* 引用块：标注原文摘录（高亮色竖条 + 斜体，对齐 fleurPDF Comment Dialog） */
+.fleur-epub-annpop-quote {
+	position: relative;
+	padding: 10px 14px;
+	background: var(--background-secondary);
+	border-radius: 4px;
+}
+
+.fleur-epub-annpop-quote-bar {
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: 3px;
+	border-radius: 4px 0 0 4px;
+	background: var(--fleur-hl-color, #f2c14e);
+}
+
+.fleur-epub-annpop-quote-text {
 	font-size: 13px;
-	font-style: normal;
-	line-height: 1.5;
+	line-height: 1.65;
 	color: var(--text-normal);
-	white-space: pre-wrap;
+	font-style: italic;
+	letter-spacing: 0.01em;
+	max-height: 110px;
+	overflow-y: auto;
 	word-break: break-word;
 	user-select: text;
 	-webkit-user-select: text;
 }
 
-/* 「展开全文 › / 收起 ▲」切换（对齐 fleur-annotation tooltip） */
-.fleur-epub-annpop-toggle {
-	font-size: 11px;
+/* 「注释」小标签（对齐 fleurPDF） */
+.fleur-epub-annpop-label {
+	font-size: 11.5px;
+	font-weight: 500;
 	color: var(--text-faint);
-	margin-top: 2px;
-	text-align: right;
-	cursor: pointer;
-}
-.fleur-epub-annpop-toggle:hover {
-	color: var(--text-muted);
-}
-
-/* 编辑视图：标题 + 选中文本预览 + 输入 + 按钮行（对齐 fleur-annotation CommentModal） */
-.fleur-epub-annpop-title {
-	margin: 2px 0 8px;
-	font-size: 17px;
-	font-weight: 600;
-	color: var(--text-normal);
-	letter-spacing: -0.01em;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	margin: 2px 0 2px;
 }
 
 .fleur-epub-annpop-input {
@@ -671,6 +675,74 @@
 .fleur-epub-annpop-btn.is-accent:hover {
 	opacity: 0.9;
 	transform: translateY(-1px);
+}
+
+/* ── 批注查看气泡：FleurAnnotation tooltip 式（点击已有批注弹出）──
+   轻量卡片：无标题栏/拖拽/缩放、无任何记忆，高度自适应内容 +「展开全文/收起」 */
+.fleur-epub-annview {
+	position: fixed;
+	z-index: 10010;
+	max-width: 300px;
+	max-height: min(60vh, 420px);
+	overflow-y: auto;
+	padding: 4px 14px 10px;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--text-normal);
+	user-select: text;
+	-webkit-user-select: text;
+}
+
+/* 顶部拖拽手柄：默认隐藏，hover 气泡时浮现（subtle 居中小横条），拖拽中保持可见 */
+.fleur-epub-annview-grip {
+	height: 12px;
+	margin: 0 -14px 2px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: grab;
+	touch-action: none;
+	flex: 0 0 auto;
+}
+.fleur-epub-annview-grip::before {
+	content: '';
+	width: 26px;
+	height: 3px;
+	border-radius: 2px;
+	background: var(--text-faint);
+	opacity: 0;
+	transition: opacity 0.15s ease;
+}
+.fleur-epub-annview:hover .fleur-epub-annview-grip::before,
+.fleur-epub-annview-grip:active::before {
+	opacity: 1;
+}
+.fleur-epub-annview-grip:hover {
+	cursor: grab;
+}
+.fleur-epub-annview-grip:active {
+	cursor: grabbing;
+}
+
+.fleur-epub-annview-text {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* 「展开全文 › / 收起 ▲」切换（对齐 FleurAnnotation tooltip） */
+.fleur-epub-annview-toggle {
+	font-size: 11px;
+	color: var(--text-faint);
+	margin-top: 4px;
+	text-align: right;
+	cursor: pointer;
+}
+.fleur-epub-annview-toggle:hover {
+	color: var(--text-muted);
 }
 
 .fleur-ai-panel {

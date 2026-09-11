@@ -273,7 +273,7 @@ export class EpubReaderView extends FileView {
 					const rect = rects[0];
 					if (rect) host = this.toHostCoords(doc, rect.left, rect.bottom);
 				}
-				this.showAnnotationPopup(ann, host.x, host.y);
+				this.showAnnotationViewer(ann, host.x, host.y);
 			});
 
 			// 翻页 / 滚动时收起全部浮层，并按新视口重排翻译优先级（节流）
@@ -906,7 +906,7 @@ export class EpubReaderView extends FileView {
 		mkBtn('~', '划线（波浪线）', () => void this.createAnnotation('wavy', 'purple'));
 		mkBtn('✎', '批注', () => {
 			void this.createAnnotation('highlight', 'yellow').then((ann) => {
-				if (ann) this.showAnnotationPopup(ann, host.x, host.y, true);
+				if (ann) this.showAnnotationEditor(ann, host.x, host.y);
 			});
 		});
 		bar.createDiv('fleur-epub-selbar-sep');
@@ -1232,21 +1232,25 @@ export class EpubReaderView extends FileView {
 		return ann.comment ? '清除高亮与批注' : '清除高亮';
 	}
 
-	// ── 批注卡片：换色 / 编辑批注 / 删除 ──
+	// ── 批注弹窗（两个独立窗口，互不共享尺寸/位置）──
+	// 编辑弹窗 fleur-epub-annpop：fleurPDF Comment Dialog 式（引用块 +「注释」标签 + 输入 + 取消/保存），
+	//   高度自适应内容、按钮行永远可见；仅拖拽位置与宽度记忆。
+	// 查看气泡 fleur-epub-annview：FleurAnnotation tooltip 式（轻量、高度自适应、展开/收起），无任何记忆。
 
-	private showAnnotationPopup(ann: EpubAnnotation, hostX: number, hostY: number, focusComment = false): void {
+	/** 编辑弹窗：添加/编辑批注（选区工具条 ✎ 进入） */
+	private showAnnotationEditor(ann: EpubAnnotation, hostX: number, hostY: number): void {
 		this.hideSelectionToolbar();
 		this.hideAnnPopup();
 		const pop = document.body.createDiv('fleur-epub-annpop');
 		this.annPopup = pop;
 
-		// 恢复用户记忆的尺寸（右下角缩放后固定；未缩放过则自适应内容）
+		// 只恢复用户记忆的宽度；高度自适应内容（此前高度记忆会遮住底部按钮行，已废弃）
 		const savedSize = this.plugin.settings.annPopSize;
-		if (savedSize) {
-			pop.setCssStyles({ width: `${savedSize.w}px`, height: `${savedSize.h}px` });
+		if (savedSize?.w) {
+			pop.setCssStyles({ width: `${savedSize.w}px` });
 		}
 
-		// 标题栏：整条可拖拽（位置记忆），右侧 ✕ 关闭（交互对齐 FleurAnnotation / 桌面窗口）
+		// 标题栏：整条可拖拽（仅当次生效，不记忆位置，每次打开仍贴批注文本旁），右侧 ✕ 关闭
 		const header = pop.createDiv('fleur-epub-annpop-header');
 		header.createDiv('fleur-epub-annpop-header-title').setText('批注');
 		const closeBtn = header.createSpan('fleur-epub-annpop-close');
@@ -1273,24 +1277,20 @@ export class EpubReaderView extends FileView {
 			});
 		});
 		const endDrag = () => {
-			if (!drag) return;
 			drag = null;
-			const rect = pop.getBoundingClientRect();
-			this.plugin.settings.annPopPos = { left: Math.round(rect.left), top: Math.round(rect.top) };
-			void this.plugin.saveSettings();
 		};
 		header.addEventListener('pointerup', endDrag);
 		header.addEventListener('pointercancel', endDrag);
 
-		// 右下角缩放手柄（尺寸记忆；280×140 起步，不出屏）
+		// 右下角缩放手柄：只调宽度（高度由内容自适应，不出屏）
 		const resize = pop.createDiv('fleur-epub-annpop-resize');
 		resize.setAttribute('aria-label', '调整大小');
-		let rs: { sx: number; sy: number; w: number; h: number } | null = null;
+		let rs: { sx: number; sy: number; w: number } | null = null;
 		resize.addEventListener('pointerdown', (e) => {
 			e.preventDefault();
 			e.stopPropagation();
 			const rect = pop.getBoundingClientRect();
-			rs = { sx: e.clientX, sy: e.clientY, w: rect.width, h: rect.height };
+			rs = { sx: e.clientX, sy: e.clientY, w: rect.width };
 			try {
 				resize.setPointerCapture(e.pointerId);
 			} catch { /* 忽略 */ }
@@ -1298,77 +1298,129 @@ export class EpubReaderView extends FileView {
 		resize.addEventListener('pointermove', (e) => {
 			if (!rs) return;
 			const w = Math.max(260, Math.min(rs.w + e.clientX - rs.sx, window.innerWidth - 16));
-			const h = Math.max(140, Math.min(rs.h + e.clientY - rs.sy, window.innerHeight - 16));
-			pop.setCssStyles({ width: `${w}px`, height: `${h}px` });
+			pop.setCssStyles({ width: `${w}px` });
 		});
 		const endResize = () => {
 			if (!rs) return;
 			rs = null;
 			const rect = pop.getBoundingClientRect();
-			this.plugin.settings.annPopSize = { w: Math.round(rect.width), h: Math.round(rect.height) };
+			this.plugin.settings.annPopSize = { w: Math.round(rect.width), h: 0 };
 			void this.plugin.saveSettings();
 		};
 		resize.addEventListener('pointerup', endResize);
 		resize.addEventListener('pointercancel', endResize);
 
-		// 批注正文区：
-		// 有批注 → 内容视图（纯文本 + 120 字截断 +「展开全文」；不出现原文、不放编辑/删除——侧边栏已有）
-		// 无批注 → 编辑视图（批注输入 + 取消/确定，⌘Enter 提交；同样不出现原文）
+		// 正文区（fleurPDF Comment Dialog 式）：标注原文引用块 →「注释」标签 → 输入框 → 按钮行
 		const body = pop.createDiv('fleur-epub-annpop-body');
-		let ta: HTMLTextAreaElement | null = null;
-		const renderEdit = () => {
-			body.empty();
-			body.createDiv('fleur-epub-annpop-title').setText(ann.comment ? '编辑批注' : '添加批注');
-			ta = body.createEl('textarea', 'fleur-epub-annpop-input');
-			ta.placeholder = '写下你的想法…';
-			ta.value = ann.comment ?? '';
-			const doSave = () => {
-				ann.comment = ta?.value.trim() || undefined;
-				this.saveBookData();
-				// 广播变更（侧边栏即时刷新）
-				this.plugin.notifyAnnotationsChanged();
-				new Notice('批注已保存', 1500);
-				if (ann.comment) renderView();
-				else this.hideAnnPopup();
-			};
-			// 按钮行：右「取消 / 确定」（CommentModal 式；删除标注走侧边栏，此处不放）
-			const row = body.createDiv('fleur-epub-annpop-btnrow');
-			const right = row.createDiv('fleur-epub-annpop-btnrow-right');
-			const cancel = right.createEl('button', 'fleur-epub-annpop-btn is-ghost');
-			cancel.setText('取消');
-			cancel.addEventListener('click', () => this.hideAnnPopup());
-			const ok = right.createEl('button', 'fleur-epub-annpop-btn is-accent');
-			ok.setText('确定');
-			ok.addEventListener('click', doSave);
-			ta.addEventListener('keydown', (e: KeyboardEvent) => {
-				if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) doSave();
-			});
-			if (focusComment) setTimeout(() => ta?.focus(), 50);
+		if (ann.text) {
+			const quote = body.createDiv('fleur-epub-annpop-quote');
+			quote
+				.createDiv('fleur-epub-annpop-quote-bar')
+				.setCssProps({ '--fleur-hl-color': HIGHLIGHT_COLORS[ann.color] ?? '#f2c14e' });
+			quote.createDiv('fleur-epub-annpop-quote-text').setText(ann.text);
+		}
+		body.createDiv('fleur-epub-annpop-label').setText('注释');
+		const ta = body.createEl('textarea', 'fleur-epub-annpop-input');
+		ta.placeholder = '写下你的想法…';
+		ta.value = ann.comment ?? '';
+
+		const doSave = () => {
+			ann.comment = ta.value.trim() || undefined;
+			this.saveBookData();
+			// 广播变更（侧边栏即时刷新）
+			this.plugin.notifyAnnotationsChanged();
+			new Notice('批注已保存', 1500);
+			this.hideAnnPopup();
 		};
-		const renderView = () => {
-			body.empty();
-			ta = null;
-			// 批注内容以正常字体、纯文本展示：去 Markdown 源码、去「批注：×××」原文标题行
-			const comment = cleanAnnotationText(ann.comment ?? '');
-			const MAX_CHARS = 120;
-			const isLong = comment.length > MAX_CHARS;
-			let expanded = false;
-			const content = body.createDiv('fleur-epub-annpop-comment');
-			content.setText(isLong ? comment.slice(0, MAX_CHARS) + '...' : comment);
-			const hint = body.createDiv('fleur-epub-annpop-toggle');
+
+		// 按钮行：右「取消 / 保存」（对齐 fleurPDF；删除标注走侧边栏，此处不放）
+		const row = body.createDiv('fleur-epub-annpop-btnrow');
+		const right = row.createDiv('fleur-epub-annpop-btnrow-right');
+		const cancel = right.createEl('button', 'fleur-epub-annpop-btn is-ghost');
+		cancel.setText('取消');
+		cancel.addEventListener('click', () => this.hideAnnPopup());
+		const ok = right.createEl('button', 'fleur-epub-annpop-btn is-accent');
+		ok.setText('保存');
+		ok.addEventListener('click', doSave);
+		ta.addEventListener('keydown', (e: KeyboardEvent) => {
+			if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) doSave();
+		});
+
+		this.mountAnnPopupClose(pop);
+		this.placeAnnPopup(pop, hostX, hostY);
+		window.setTimeout(() => ta.focus(), 60);
+	}
+
+	/** 查看气泡：点击已有批注弹出（FleurAnnotation tooltip 式，高度自适应 + 展开/收起） */
+	private showAnnotationViewer(ann: EpubAnnotation, hostX: number, hostY: number): void {
+		this.hideSelectionToolbar();
+		this.hideAnnPopup();
+		const pop = document.body.createDiv('fleur-epub-annview');
+		this.annPopup = pop;
+
+		// 顶部拖拽手柄：默认贴标注旁出现，可拖拽挪开（位置不记忆，下次仍在标注旁）
+		const grip = pop.createDiv('fleur-epub-annview-grip');
+		grip.setAttribute('aria-label', '拖拽移动');
+		let drag: { sx: number; sy: number; ox: number; oy: number } | null = null;
+		grip.addEventListener('pointerdown', (e) => {
+			e.preventDefault();
+			const rect = pop.getBoundingClientRect();
+			drag = { sx: e.clientX, sy: e.clientY, ox: rect.left, oy: rect.top };
+			try {
+				grip.setPointerCapture(e.pointerId);
+			} catch { /* 忽略 */ }
+		});
+		grip.addEventListener('pointermove', (e) => {
+			if (!drag) return;
+			const w = pop.offsetWidth;
+			const h = pop.offsetHeight;
+			const left = Math.min(Math.max(8, drag.ox + e.clientX - drag.sx), window.innerWidth - w - 8);
+			const top = Math.min(Math.max(8, drag.oy + e.clientY - drag.sy), window.innerHeight - h - 8);
+			pop.setCssStyles({ left: `${left}px`, top: `${top}px` });
+		});
+		const endDrag = () => {
+			drag = null;
+		};
+		grip.addEventListener('pointerup', endDrag);
+		grip.addEventListener('pointercancel', endDrag);
+
+		// 批注内容以正常字体、纯文本展示：去 Markdown 源码，120 字截断 +「展开全文 ›/收起 ▲」
+		const comment = cleanAnnotationText(ann.comment ?? '');
+		const MAX_CHARS = 120;
+		const isLong = comment.length > MAX_CHARS;
+		let expanded = false;
+		const content = pop.createDiv('fleur-epub-annview-text');
+		content.setText(isLong ? comment.slice(0, MAX_CHARS) + '...' : comment);
+		if (isLong) {
+			const hint = pop.createDiv('fleur-epub-annview-toggle');
 			hint.setText('展开全文 ›');
-			hint.setCssStyles({ display: isLong ? 'block' : 'none' });
-			hint.addEventListener('click', () => {
+			hint.addEventListener('click', (e) => {
+				e.stopPropagation();
 				expanded = !expanded;
 				content.setText(expanded ? comment : comment.slice(0, MAX_CHARS) + '...');
 				hint.setText(expanded ? '收起 ▲' : '展开全文 ›');
 			});
-			// 不放编辑/删除入口——侧边栏批注列表已有完整编辑与删除操作
-		};
-		if (ann.comment) renderView();
-		else renderEdit();
+		}
 
-		// 全局关闭：点击卡片外部或按 Esc 均可关闭（点击卡片内部不关闭）
+		this.mountAnnPopupClose(pop);
+		this.placeAnnPopup(pop, hostX, hostY);
+	}
+
+	/** 弹窗定位：统一贴批注文本旁（放不下翻到上方）；不记忆拖拽位置，每次打开都重新定位 */
+	private placeAnnPopup(pop: HTMLElement, hostX: number, hostY: number): void {
+		pop.setCssStyles({ visibility: 'hidden' });
+		window.requestAnimationFrame(() => {
+			const bw = pop.offsetWidth;
+			const bh = pop.offsetHeight;
+			const left = Math.max(8, Math.min(hostX - bw / 2, window.innerWidth - bw - 8));
+			let top = hostY + 14;
+			if (top + bh > window.innerHeight - 8) top = Math.max(8, hostY - bh - 14);
+			pop.setCssStyles({ left: `${left}px`, top: `${top}px`, visibility: '' });
+		});
+	}
+
+	/** 全局关闭：点击卡片外部或按 Esc（同一时刻只显示一个弹窗） */
+	private mountAnnPopupClose(pop: HTMLElement): void {
 		const outside = (e: MouseEvent) => {
 			if (!pop.contains(e.target as Node)) this.hideAnnPopup();
 		};
@@ -1383,27 +1435,6 @@ export class EpubReaderView extends FileView {
 			document.addEventListener('mousedown', outside, true);
 			document.addEventListener('keydown', esc, true);
 		}, 0);
-
-		pop.setCssStyles({ visibility: 'hidden' });
-		window.requestAnimationFrame(() => {
-			const bw = pop.offsetWidth;
-			const bh = pop.offsetHeight;
-			const saved = this.plugin.settings.annPopPos;
-			let left: number;
-			let top: number;
-			if (saved) {
-				// 用户拖拽过 → 记忆位置（钳制在视口内）
-				left = Math.min(Math.max(8, saved.left), window.innerWidth - bw - 8);
-				top = Math.min(Math.max(8, saved.top), window.innerHeight - bh - 8);
-			} else {
-				// 默认出现在标注文本旁
-				left = Math.max(8, Math.min(hostX - bw / 2, window.innerWidth - bw - 8));
-				top = hostY + 14;
-				if (top + bh > window.innerHeight - 8) top = Math.max(8, hostY - bh - 14);
-			}
-			pop.setCssStyles({ left: `${left}px`, top: `${top}px`, visibility: '' });
-			if (focusComment && ta) ta.focus();
-		});
 	}
 
 	private hideAnnPopup(): void {

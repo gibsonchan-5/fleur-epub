@@ -41,9 +41,7 @@ export interface FleurEpubSettings {
 	annotationLimit: number;
 	/** AI 浮窗位置记忆 */
 	aiPanelPos?: { left: number; top: number };
-	/** 批注卡片位置记忆（用户拖拽后固定；undefined = 默认出现在标注文本旁） */
-	annPopPos?: { left: number; top: number };
-	/** 批注卡片尺寸记忆（用户缩放后固定） */
+	/** 批注编辑弹窗宽度记忆（h 已废弃：高度改为随内容自适应，按钮行永远可见） */
 	annPopSize?: { w: number; h: number };
 	/** 批注笔记导出文件夹（vault 内相对路径；'' = 根目录，默认 FleurEpub） */
 	noteFolder: string;
