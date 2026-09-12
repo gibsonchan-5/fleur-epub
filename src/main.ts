@@ -7,9 +7,24 @@ import { CoverCache } from './cover-cache';
 import { DEFAULT_SETTINGS, FleurEpubSettingTab, type FleurEpubSettings } from './settings';
 import { EpubReaderView, VIEW_TYPE_EPUB } from './reader-view';
 import { ShelfView, VIEW_TYPE_SHELF } from './shelf-view';
+import {
+	hydrateSecrets,
+	scrubSecretsForPersistence,
+	secretStorageAvailable,
+	migrateSecrets,
+	resolveBackend,
+	type SecretBackend,
+} from './secret-store';
 
 export default class FleurEpubPlugin extends Plugin {
 	settings!: FleurEpubSettings;
+	/** 本机 Obsidian 是否支持官方 SecretStorage（系统钥匙串）。 */
+	secretStorageAvailable = false;
+
+	/** 当前实际生效的密钥后端（system=钥匙串，vault=data.json 明文）。 */
+	get secretBackend(): SecretBackend {
+		return resolveBackend(this.app, this.settings.secretStorageMode);
+	}
 	bookStore!: BookStore;
 	/** 书籍封面缓存（书架网格视图用） */
 	coverCache!: CoverCache;
@@ -146,7 +161,8 @@ export default class FleurEpubPlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const raw = (await this.loadData()) as Record<string, unknown> | null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, raw ?? {});
 		// 迁移旧版单自定义提示词（customPrompt: string）→ 三槽（customPrompts: string[]）
 		const legacy = (this.settings as unknown as Record<string, unknown>).customPrompt;
 		if (typeof legacy === 'string' && legacy.trim()) {
@@ -162,9 +178,60 @@ export default class FleurEpubPlugin extends Plugin {
 		if ((this.settings.promptPreset as string) === 'custom') {
 			this.settings.promptPreset = 'custom-1';
 		}
+
+		// API Key 存入系统钥匙串；磁盘上若还留有明文，在这里迁走并清掉。
+		// 用户切到 data.json 模式时则反其道行之：文件即真相，不写钥匙串。
+		this.secretStorageAvailable = secretStorageAvailable(this.app);
+		const secretState = await hydrateSecrets(
+			this.app,
+			this.settings as unknown as Record<string, unknown>,
+			raw,
+			this.secretBackend,
+		);
+		if (secretState.migrated.length > 0) {
+			await this.saveSettings();
+			new Notice('FleurEPUB：API Key 已移入系统钥匙串，data.json 中不再保存明文');
+		}
 	}
 
 	async saveSettings(): Promise<void> {
-		await this.saveData(this.settings);
+		// 密钥只写系统钥匙串；写盘时从副本里抹掉（钥匙串不可用时保留明文，避免丢密钥）。
+		// data.json 模式下原样落盘——明文正是用户的选择。
+		await this.saveData(
+			await scrubSecretsForPersistence(
+				this.app,
+				this.settings as unknown as Record<string, unknown>,
+				this.secretBackend,
+			),
+		);
+	}
+
+	/**
+	 * 切换密钥保存位置并搬迁现有密钥。
+	 *
+	 * 搬入钥匙串逐字段校验；任何一步写不进去就回滚到原模式，
+	 * 宁可维持明文也不丢密钥。
+	 */
+	async setSecretStorageMode(
+		mode: 'system' | 'vault',
+	): Promise<{ ok: boolean; failed: string[] }> {
+		const previous = this.settings.secretStorageMode;
+		const target = resolveBackend(this.app, mode);
+
+		this.settings.secretStorageMode = mode;
+		const result = await migrateSecrets(
+			this.app,
+			this.settings as unknown as Record<string, unknown>,
+			target,
+		);
+
+		if (!result.ok) {
+			this.settings.secretStorageMode = previous;
+			await this.saveSettings();
+			return { ok: false, failed: [...result.failed] };
+		}
+
+		await this.saveSettings();
+		return { ok: true, failed: [] };
 	}
 }
