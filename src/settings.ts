@@ -8,6 +8,9 @@ export type ReaderTheme = 'light' | 'dark' | 'sepia' | 'green';
 /** 对照翻译引擎：AI（大模型，支持文言→白话）/ 微软机翻（免密钥、快、零 token） */
 export type TranslationEngineKind = 'ai' | 'microsoft';
 
+/** 侧边栏批注排序：document = 行文顺序（按 CFI 在正文中的位置）/ time = 批注创建时间 */
+export type AnnotationSortKind = 'document' | 'time';
+
 export interface FleurEpubSettings {
 	fontSize: number;
 	flow: 'scrolled' | 'paginated';
@@ -46,6 +49,8 @@ export interface FleurEpubSettings {
 	customPrompts: string[];
 	/** 侧边栏批注场景的基准字数上限 */
 	annotationLimit: number;
+	/** 侧边栏批注组内排序：document = 行文顺序 / time = 批注时间（默认） */
+	annotationSort: AnnotationSortKind;
 	/** AI 浮窗位置记忆 */
 	aiPanelPos?: { left: number; top: number };
 	/** 批注编辑弹窗宽度记忆（h 已废弃：高度改为随内容自适应，按钮行永远可见） */
@@ -66,7 +71,7 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	paraSpacing: 0.85,
 	fontFamily: '',
 	fontWeight: 400,
-	translationEngine: 'ai',
+	translationEngine: 'microsoft',
 	aiProvider: 'deepseek',
 	apiKey: '',
 	secretStorageMode: 'system',
@@ -76,6 +81,7 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	promptPreset: 'default',
 	customPrompts: ['', '', ''],
 	annotationLimit: 250,
+	annotationSort: 'time',
 	noteFolder: 'FleurEpub',
 };
 
@@ -150,6 +156,25 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 						this.plugin.settings.theme = v as typeof this.plugin.settings.theme;
 						await this.plugin.saveSettings();
 						this.plugin.getActiveReader()?.applyReaderStyles();
+					}),
+			);
+
+		// ── 批注（侧边栏排序等） ──
+		new Setting(containerEl).setName('批注').setHeading();
+
+		new Setting(containerEl)
+			.setName('侧边栏批注排序')
+			.setDesc('同一章节内批注的排列方式：行文顺序 = 按标注在正文中的先后位置排列，适合通读回顾；批注时间 = 按创建先后排列（默认）')
+			.addDropdown((drop) =>
+				drop
+					.addOption('time', '按批注时间（创建先后）')
+					.addOption('document', '按行文顺序（上下文先后）')
+					.setValue(this.plugin.settings.annotationSort ?? 'time')
+					.onChange(async (v) => {
+						this.plugin.settings.annotationSort = v === 'document' ? 'document' : 'time';
+						await this.plugin.saveSettings();
+						// 立即刷新已打开的侧边栏批注 tab
+						this.plugin.refreshShelf();
 					}),
 			);
 

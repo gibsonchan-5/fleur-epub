@@ -6,6 +6,7 @@
 import { ItemView, WorkspaceLeaf, Notice, TFile, debounce } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { HIGHLIGHT_COLORS } from './reader-view';
+import { compare as CFIcompare } from '../vendor/foliate-js/epubcfi.js';
 import { AIService } from './ai-service';
 import { resolveSystemPrompt } from './ai-prompts';
 import { stripMarkdown, cleanAnnotationText } from './text-utils';
@@ -65,6 +66,18 @@ function pickReadableFg(bg: string): string {
 /** 空白收敛为单行（EPUB 选段常带换行） */
 function normalizeWhitespace(s: string): string {
 	return s.replace(/\s+/g, ' ').trim();
+}
+
+// ── 批注「行文顺序」比较：复用 vendored foliate-js 的 CFI compare ──
+// 该实现按 EPUB CFI 规范逐级比较路径步进与偏移，范围 CFI 会先折算起点再比较，即文档位置先后。
+
+/** 按文档位置比较两条 CFI（负 = a 在前，正 = b 在前；解析失败视为相等，保持原序） */
+function compareAnnotationCfi(a: string, b: string): number {
+	try {
+		return CFIcompare(a, b);
+	} catch {
+		return 0;
+	}
 }
 
 export class ShelfView extends ItemView {
@@ -372,10 +385,11 @@ export class ShelfView extends ItemView {
 			const tag = createDiv('fleur-epub-ann-section-tag');
 			tag.setText(chapter);
 			section.appendChild(tag);
-			// 组内按创建时间先后
+			// 组内排序：行文顺序（CFI 在正文中的位置）/ 批注时间（设置可选，默认时间）
+			const byDocument = (this.plugin.settings.annotationSort ?? 'time') === 'document';
 			items
 				.slice()
-				.sort((a, b) => a.createdAt - b.createdAt)
+				.sort((a, b) => (byDocument ? compareAnnotationCfi(a.cfi, b.cfi) : a.createdAt - b.createdAt))
 				.forEach((ann) => this.renderAnnotationCard(section, ann));
 			this.listEl.appendChild(section);
 		}
