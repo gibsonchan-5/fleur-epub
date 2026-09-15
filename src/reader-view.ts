@@ -198,6 +198,12 @@ export class EpubReaderView extends FileView {
 	private annPopupClose: (() => void) | null = null;
 	/** 批注弹窗最近一次弹出时间：relocate 宽限期判定用（键盘弹出/字体加载的浮动重排不得闪掉弹窗） */
 	private annPopupShownAt = 0;
+	/** 弹窗锚点（宿主坐标）：键盘弹出/收起后按可见带重新落位，避免被键盘盖住 */
+	private annPopupAnchor: { x: number; y: number } | null = null;
+	/** 移动端 · 可见带同步（软键盘）清理函数 */
+	private vvCleanup: (() => void) | null = null;
+	/** 移动端 · 可见带同步的 rAF 节流句柄 */
+	private vvRaf: number | null = null;
 	/** 打开 AI 面板时捕获的选区锚点（供「写入批注」延迟落点，选区塌缩后仍可写入） */
 	private aiAnnotSeed: { cfi: string; text: string } | null = null;
 	/** 上一次 relocate 的全书比例：判定位置是否真的变化（snap 校正等未变时不得关浮层） */
@@ -380,12 +386,97 @@ export class EpubReaderView extends FileView {
 			this.chrome = new MobileChrome(this);
 			this.contentEl.appendChild(this.chrome.toolbarEl);
 			this.contentEl.addClass('is-chrome-hidden');
+			// 软键盘自适应：宿主（Obsidian）弹出键盘时会为输入预留一块等高空白，
+			// 阅读区被压成一条、下方露出宿主白底（表现为「批注窗口出现后背景变白」）。
+			this.setupMobileViewportSync();
 			// 沉浸全屏自动退出：切到其它视图/面板时撤掉全局隐藏类，避免影响其它界面
 			this.leafChangeRef = this.app.workspace.on('active-leaf-change', () => {
 				if (!this.immersive) return;
 				if (this.app.workspace.getActiveViewOfType(EpubReaderView) !== this) this.setImmersive(false);
 			});
 		}
+	}
+
+	/**
+	 * 移动端软键盘自适应。
+	 *
+	 * 背景：Obsidian 移动端在软键盘弹出时会预留一块与键盘等高的空白（把内容顶出键盘），
+	 * 而阅读根元素（即 view-content）是 height:100% —— 于是阅读区只剩很窄一条，
+	 * 下方的预留区露出宿主白底。批注编辑框聚焦必然弹键盘，所以症状表现为
+	 * 「批注窗口出现后背景变白」。
+	 *
+	 * 做法：监听可见视口（visualViewport）变化，把阅读根元素撑满「可见带」
+	 * （顶到键盘上沿），并清掉宿主注入的底部留白。桌面端不注册任何监听。
+	 */
+	private setupMobileViewportSync(): void {
+		const vv = window.visualViewport;
+		const schedule = () => {
+			if (this.vvRaf !== null) return;
+			this.vvRaf = window.requestAnimationFrame(() => {
+				this.vvRaf = null;
+				this.syncReaderViewport();
+				this.reflowAnnPopup();
+			});
+		};
+		vv?.addEventListener('resize', schedule);
+		vv?.addEventListener('scroll', schedule);
+		window.addEventListener('resize', schedule);
+		this.vvCleanup = () => {
+			vv?.removeEventListener('resize', schedule);
+			vv?.removeEventListener('scroll', schedule);
+			window.removeEventListener('resize', schedule);
+			if (this.vvRaf !== null) {
+				window.cancelAnimationFrame(this.vvRaf);
+				this.vvRaf = null;
+			}
+			this.contentEl.style.removeProperty('height');
+			this.contentEl.style.removeProperty('padding-bottom');
+		};
+		this.syncReaderViewport();
+	}
+
+	/** 可见带底部（软键盘弹出时即键盘上沿，宿主坐标） */
+	private visibleBandBottom(): number {
+		const vv = window.visualViewport;
+		return (vv?.offsetTop ?? 0) + (vv?.height ?? window.innerHeight);
+	}
+
+	/** 把阅读根元素撑满可见带：宿主为键盘预留的空白（无论落在根元素自身还是父级）都不再露出白底 */
+	private syncReaderViewport(): void {
+		const root = this.contentEl;
+		if (!root?.isConnected) return;
+		let rect = root.getBoundingClientRect();
+		const band = this.visibleBandBottom() - rect.top;
+		if (band <= 40) return;
+		const cs = getComputedStyle(root);
+		const padTop = Number.parseFloat(cs.paddingTop) || 0;
+		const padBottom = Number.parseFloat(cs.paddingBottom) || 0;
+		// ① 宿主把留白注在根元素自身（padding-bottom + border-box）→ 阅读区被压成一条，清掉它。
+		//    注意 clientHeight 含内边距，测不准，必须按内容盒高度判断。
+		if (padBottom > 8 && band - (rect.height - padTop - padBottom) > 8) {
+			root.setCssStyles({ paddingBottom: '0px' });
+			rect = root.getBoundingClientRect();
+		}
+		// ② 宿主把留白注在父级（子元素撑不过去）→ 显式指定高度铺到可见带底部
+		if (band - rect.height > 24) {
+			root.setCssStyles({ height: `${Math.round(band)}px` });
+		} else if (root.style.height && rect.height - band > 24) {
+			// 可见带变大（键盘收起 / 转屏）→ 交回 CSS，避免残留固定高度
+			root.style.removeProperty('height');
+		}
+	}
+
+	/** 可见带变化（键盘弹出/收起）后，把已打开的弹窗重新落位——贴锚点优先，放不下则贴键盘上沿 */
+	private reflowAnnPopup(): void {
+		const pop = this.annPopup;
+		if (!pop || !this.annPopupAnchor) return;
+		// 正在输入且弹窗已完整落在可见带内 → 不打扰（键盘动画期间 vv 事件很密集）
+		const rect = pop.getBoundingClientRect();
+		const bandTop = Math.max(8, (window.visualViewport?.offsetTop ?? 0) + 8);
+		const bandBottom = this.visibleBandBottom() - 8;
+		const inside = rect.top >= bandTop - 1 && rect.bottom <= bandBottom + 1;
+		if (inside && pop.contains(document.activeElement)) return;
+		this.placeAnnPopup(pop, this.annPopupAnchor.x, this.annPopupAnchor.y);
 	}
 
 	/** 沉浸全屏：隐藏 Obsidian 移动端顶部导航（navbar / tab 头 / view 头），阅读区铺满 */
@@ -2017,6 +2108,8 @@ export class EpubReaderView extends FileView {
 		const comment = cleanAnnotationText(ann.comment ?? '');
 		if (!comment) {
 			const clearLabel = this.describeAnnotation(ann);
+			// 清除专用卡：单动作、更紧凑（移动端按 is-clear-only 收窄内边距与按钮尺寸）
+			pop.addClass('is-clear-only');
 			const row = pop.createDiv('fleur-epub-annview-clear');
 			const btn = row.createDiv('fleur-epub-annquick-btn is-wide');
 			btn.setAttribute('aria-label', clearLabel);
@@ -2245,16 +2338,36 @@ export class EpubReaderView extends FileView {
 		this.placeAnnPopup(pop, hostX, hostY);
 	}
 
-	/** 弹窗定位：统一贴批注文本旁（放不下翻到上方）；不记忆拖拽位置，每次打开都重新定位 */
+	/**
+	 * 弹窗定位：统一贴批注文本旁（放不下翻到上方）；不记忆拖拽位置，每次打开都重新定位。
+	 * 移动端按「可见带」落位——软键盘弹出后可见带被压缩，弹窗改为贴键盘上沿，
+	 * 保证输入框与按钮行始终可见（微信读书式）；高度超出可见带时内部滚动。
+	 */
 	private placeAnnPopup(pop: HTMLElement, hostX: number, hostY: number): void {
+		this.annPopupAnchor = { x: hostX, y: hostY };
 		pop.setCssStyles({ visibility: 'hidden' });
 		window.requestAnimationFrame(() => {
+			if (!pop.isConnected) return;
 			const bw = pop.offsetWidth;
-			const bh = pop.offsetHeight;
+			const vv = window.visualViewport;
+			const bandTop = Math.max(8, (vv?.offsetTop ?? 0) + 8);
+			const bandBottom = this.visibleBandBottom() - 8;
+			const inner = Math.max(120, bandBottom - bandTop);
+			// 可见带装不下时压缩文本域（域内滚动），按钮行始终可见
+			const ta = pop.querySelector<HTMLTextAreaElement>('textarea');
+			ta?.style.removeProperty('max-height');
+			let bh = pop.offsetHeight;
+			if (bh > inner && ta) {
+				const h = Math.max(64, ta.offsetHeight - (bh - inner) - 6);
+				ta.style.maxHeight = `${Math.round(h)}px`;
+				bh = pop.offsetHeight;
+			}
 			const left = Math.max(8, Math.min(hostX - bw / 2, window.innerWidth - bw - 8));
 			let top = hostY + 14;
-			if (top + bh > window.innerHeight - 8) top = Math.max(8, hostY - bh - 14);
-			pop.setCssStyles({ left: `${left}px`, top: `${top}px`, visibility: '' });
+			if (top + bh > bandBottom) top = hostY - bh - 14;
+			if (top < bandTop || top + bh > bandBottom) top = bandBottom - bh;
+			top = Math.max(bandTop, top);
+			pop.setCssStyles({ left: `${left}px`, top: `${Math.round(top)}px`, visibility: '' });
 		});
 	}
 
@@ -2492,6 +2605,7 @@ export class EpubReaderView extends FileView {
 			this.annPopup.remove();
 			this.annPopup = null;
 		}
+		this.annPopupAnchor = null;
 	}
 
 	// ════════ 侧边栏联动 API（M3）：目录 / 定位 / 检索 ════════
@@ -2722,6 +2836,8 @@ export class EpubReaderView extends FileView {
 
 	async onClose(): Promise<void> {
 		this.setImmersive(false);
+		this.vvCleanup?.();
+		this.vvCleanup = null;
 		if (this.leafChangeRef) {
 			this.app.workspace.offref(this.leafChangeRef);
 			this.leafChangeRef = null;
