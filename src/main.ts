@@ -7,6 +7,7 @@ import { CoverCache } from './cover-cache';
 import { DEFAULT_SETTINGS, FleurEpubSettingTab, type FleurEpubSettings } from './settings';
 import { EpubReaderView, VIEW_TYPE_EPUB } from './reader-view';
 import { ShelfView, VIEW_TYPE_SHELF } from './shelf-view';
+import { installCompatPolyfills } from './compat';
 import {
 	hydrateSecrets,
 	scrubSecretsForPersistence,
@@ -48,6 +49,8 @@ export default class FleurEpubPlugin extends Plugin {
 	}
 
 	async onload(): Promise<void> {
+		// 旧 WebView 兼容层（Android：Array.at / replaceAll），必须最先执行
+		installCompatPolyfills();
 		await this.loadSettings();
 		this.bookStore = new BookStore(this.app, this);
 		this.coverCache = new CoverCache(this.app, this);
@@ -183,12 +186,19 @@ export default class FleurEpubPlugin extends Plugin {
 	 * 打开后视图不是本插件的阅读器，就强制 setViewState 切换（不再依赖扩展名注册）。
 	 */
 	private async openInReader(leaf: WorkspaceLeaf, file: TFile): Promise<void> {
-		await leaf.openFile(file, { active: true });
-		if ((leaf.view as EpubReaderView).getViewType() !== VIEW_TYPE_EPUB) {
-			await leaf.setViewState(
-				{ type: VIEW_TYPE_EPUB, state: { file: file.path } },
-				{ active: true },
-			);
+		try {
+			await leaf.openFile(file, { active: true });
+			if ((leaf.view as EpubReaderView).getViewType() !== VIEW_TYPE_EPUB) {
+				await leaf.setViewState(
+					{ type: VIEW_TYPE_EPUB, state: { file: file.path } },
+					{ active: true },
+				);
+			}
+		} catch (e) {
+			// 移动端无法看控制台：错误浮出为 Notice（同时保留 console.error）
+			const msg = e instanceof Error ? `${e.message}` : String(e);
+			console.error('[FleurEPUB] 打开书籍失败', file.path, e);
+			new Notice(`FleurEPUB 打开失败：${msg}`, 6000);
 		}
 	}
 
