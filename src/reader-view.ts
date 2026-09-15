@@ -2132,7 +2132,7 @@ export class EpubReaderView extends FileView {
 				return void view.goTo(href);
 			}
 
-			const text = this.extractFootnoteText(el);
+			const text = this.extractFootnoteText(el, a?.textContent ?? '');
 			if (!text) {
 				trace(`${href} → jump（脚注内容为空）`);
 				return void view.goTo(href);
@@ -2178,7 +2178,7 @@ export class EpubReaderView extends FileView {
 	}
 
 	/** 提取脚注纯文本：按块级元素分段；剥掉回链小链接（↩ / 返回 / ↑ 等）避免噪声 */
-	private extractFootnoteText(el: Element): string {
+	private extractFootnoteText(el: Element, refText = ''): string {
 		const collect = (node: Element): string => {
 			const clone = node.cloneNode(true) as Element;
 			clone.querySelectorAll('a[href]').forEach((x) => {
@@ -2187,6 +2187,12 @@ export class EpubReaderView extends FileView {
 				if (!t || /^[↩↑←⟲⌂🔙\s]+$/.test(t) || t === '返回') x.remove();
 				else x.replaceWith(...Array.from(x.childNodes));
 			});
+			// 嵌套脚注容器（<div id=n2>(2)…<div id=n3>…</div>…）：截掉带 id 的后续子块，只留本条
+			const idKids = Array.from(clone.children).filter((c) => c.hasAttribute('id') || c.hasAttribute('name'));
+			if (idKids.length >= 2) {
+				const cut = Array.prototype.indexOf.call(clone.children, idKids[1]);
+				if (cut > 0) while (clone.children.length > cut) clone.children[clone.children.length - 1].remove();
+			}
 			const blocks = Array.from(clone.querySelectorAll('p, li, blockquote, dd, dt, h1, h2, h3, h4, h5, h6'));
 			const lines = blocks.length
 				? blocks.map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)
@@ -2195,6 +2201,20 @@ export class EpubReaderView extends FileView {
 		};
 		// 纯序号形态：「(1)」「[2]」「*」「①」等——说明锚点落在词典 dt / 独立标记节点上
 		const isMarkerOnly = (t: string) => /^[(\[]?[0-9*†‡§①-⑳]{1,4}[)\].。]?$/.test(t.replace(/\s+/g, ''));
+		// 序号分段：提取结果含多条脚注（无 id 平铺容器）时，按引用序号切出对应条目
+		const sliceByMarker = (full: string, want: number): string | null => {
+			const ms = Array.from(full.matchAll(/[(（\[]?(\d{1,3})[)）\].、．]/g));
+			if (ms.length < 2) return null;
+			const nums = ms.map((m) => parseInt(m[1]!, 10));
+			const idx = nums.indexOf(want);
+			if (idx < 0) return null;
+			let inc = 0;
+			for (let i = 1; i < nums.length; i++) if (nums[i]! > nums[i - 1]!) inc++;
+			if (inc < nums.length - 2) return null; // 序号非递增 → 不是脚注列表，不切
+			const start = ms[idx]!.index ?? 0;
+			const end = idx + 1 < ms.length ? ms[idx + 1]!.index ?? full.length : full.length;
+			return full.slice(start, end).trim() || null;
+		};
 		let text = collect(el).trim();
 		if (text && isMarkerOnly(text)) {
 			// 正文在相邻节点（dd / 下一段 / 下一个 li）——向后找最多 3 个兄弟
@@ -2202,21 +2222,33 @@ export class EpubReaderView extends FileView {
 			for (let i = 0; sib && i < 3; i++) {
 				const t = collect(sib).trim();
 				if (t && !isMarkerOnly(t)) {
-					return `${text}\n${t}`;
+					text = `${text}\n${t}`;
+					break;
 				}
 				sib = sib.nextElementSibling;
 			}
 			// 兜底：el 是包裹层的子标记（如 <li><sup id>…</sup></li>），从父层的下一个兄弟找
-			const parent = el.parentElement;
-			if (parent && parent !== el.ownerDocument?.body) {
-				let psib = parent.nextElementSibling;
-				for (let i = 0; psib && i < 3; i++) {
-					const t = collect(psib).trim();
-					if (t && !isMarkerOnly(t)) {
-						return `${text}\n${t}`;
+			if (isMarkerOnly(text)) {
+				const parent = el.parentElement;
+				if (parent && parent !== el.ownerDocument?.body) {
+					let psib = parent.nextElementSibling;
+					for (let i = 0; psib && i < 3; i++) {
+						const t = collect(psib).trim();
+						if (t && !isMarkerOnly(t)) {
+							text = `${text}\n${t}`;
+							break;
+						}
+						psib = psib.nextElementSibling;
 					}
-					psib = psib.nextElementSibling;
 				}
+			}
+		}
+		// 引用侧带数字且提取文本包含多条递增序号 → 只保留对应条目
+		if (text) {
+			const refNum = refText.match(/\d{1,3}/);
+			if (refNum) {
+				const seg = sliceByMarker(text, parseInt(refNum[0], 10));
+				if (seg && seg.length < text.length) text = seg;
 			}
 		}
 		return text;
