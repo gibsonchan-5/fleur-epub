@@ -1677,22 +1677,26 @@ export class EpubReaderView extends FileView {
 			this.applyReaderStyles();
 		};
 
-		// ── 背景主题：五色圆形 swatch（纯白 · 浅色 · 深色 · 暖黄 · 豆绿）──
-		const themeRow = mkRow('背景');
-		themeRow.addClass('is-themes');
-		for (const [key, t] of Object.entries(READER_THEMES)) {
-			const sw = themeRow.createDiv('fleur-epub-appear-swatch');
-			sw.setAttribute('aria-label', t.label);
-			// 记 key：重置时按 key 找 active swatch（不依赖位置索引）
-			sw.dataset.theme = key;
-			sw.setCssStyles({ background: t.bg });
-			if (s.theme === key) sw.addClass('is-active');
-			sw.addEventListener('click', () => {
-				s.theme = key as ReaderTheme;
-				persist();
-				themeRow.findAll('.fleur-epub-appear-swatch').forEach((d) => d.removeClass('is-active'));
-				sw.addClass('is-active');
-			});
+		// ── 背景主题：圆形 swatch（浅色 · 深色 · 暖黄 · 豆绿）──
+		// 移动端不再列出：底部工具栏已有独立的「背景」（调色板）入口，
+		// 两处入口重复 → 移动端只保留工具栏那处；桌面无工具栏，继续留在这里。
+		if (!isMobileUI(this.plugin)) {
+			const themeRow = mkRow('背景');
+			themeRow.addClass('is-themes');
+			for (const [key, t] of Object.entries(READER_THEMES)) {
+				const sw = themeRow.createDiv('fleur-epub-appear-swatch');
+				sw.setAttribute('aria-label', t.label);
+				// 记 key：重置时按 key 找 active swatch（不依赖位置索引）
+				sw.dataset.theme = key;
+				sw.setCssStyles({ background: t.bg });
+				if (s.theme === key) sw.addClass('is-active');
+				sw.addEventListener('click', () => {
+					s.theme = key as ReaderTheme;
+					persist();
+					themeRow.findAll('.fleur-epub-appear-swatch').forEach((d) => d.removeClass('is-active'));
+					sw.addClass('is-active');
+				});
+			}
 		}
 
 		// ── 字体：预置 + 本机扫描 + 自定义输入 ──
