@@ -2258,6 +2258,16 @@ body.fleur-epub-mobile .fleur-epub-sheet-export:active {
 	opacity: 0.45;
 	cursor: default;
 }
+/* 引擎说明（为何系统语音灰着 / 在线语音为何没声）：空串时不占位 */
+.fleur-epub-tts-player .fleur-epub-tts-hint {
+	margin: 6px 2px 0;
+	font-size: 11.5px;
+	line-height: 1.5;
+	color: var(--text-faint);
+}
+.fleur-epub-tts-player .fleur-epub-tts-hint:empty {
+	display: none;
+}
 .fleur-epub-tts-player .fleur-epub-tts-voice-scroll {
 	display: flex;
 	gap: 8px;

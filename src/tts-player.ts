@@ -58,6 +58,16 @@ export function buildTTSPlayer(container: HTMLElement, view: EpubReaderView): ()
 		engineBtns.set(e.v, b);
 	}
 
+	// 引擎说明（触屏上看不到悬浮提示，直接把原因写在界面上：
+	// 系统语音为何灰着 / 在线语音为何还不出声）
+	const engineHint = container.createDiv('fleur-epub-tts-hint');
+	const engineHintOf = (): string => {
+		if (!systemOk) return '当前平台（安卓 WebView）不提供系统朗读，请使用在线语音';
+		if (tts.engine() === 'online' && !tts.onlineReady()) return '在线语音未配置：设置 → 听书 填入接口地址与密钥';
+		return '';
+	};
+	engineHint.setText(engineHintOf());
+
 	// 声源：系统 = 内置语音 chips；在线 = 当前提供商的音色 chips
 	const caption = container.createDiv('fleur-epub-tts-caption');
 	const voiceScroll = container.createDiv('fleur-epub-tts-voice-scroll');
@@ -127,6 +137,7 @@ export function buildTTSPlayer(container: HTMLElement, view: EpubReaderView): ()
 		playBtn.toggleClass('is-playing', s.active && !s.paused);
 		for (const [r, b] of rateBtns) b.toggleClass('is-active', r === s.rate);
 		for (const [v, b] of engineBtns) b.toggleClass('is-active', v === s.engine);
+		engineHint.setText(engineHintOf());
 		// 声源列表异步到达（voiceschanged）/ 引擎或音色变化后补渲染；句推进时不重绘
 		const engine = s.engine;
 		const key = engine === 'online'
