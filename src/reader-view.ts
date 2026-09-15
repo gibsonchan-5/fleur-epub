@@ -25,6 +25,10 @@ export const VIEW_TYPE_EPUB = 'fleur-epub-view';
 /** 左右点按翻页的区域宽度占比（与微信读书一致的左右各 ~38%） */
 const ZONE_RATIO = 0.38;
 
+/** 右上角进度环几何：SVG viewBox 36×36，进度用 dashoffset 表达 */
+const RING_RADIUS = 15.5;
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+
 /** 滚动模式跨章·新手势间隔：滚轮事件间隔超过该毫秒数视为「松手后再滚」，立即翻章 */
 const SCROLL_GESTURE_GAP = 250;
 /** 滚动模式跨章·章缘累计门槛：停到章顶/章底后，继续推过该像素量（约 1/3 屏）即翻章 */
@@ -165,7 +169,10 @@ export class EpubReaderView extends FileView {
 	private saveTimer: number | null = null;
 	/** 标注重挂就绪轮询计时（foliate load 事件早于 overlayer 创建，需延迟挂载） */
 	private annMountTimer: number | null = null;
-	private percentEl!: HTMLElement;
+	/** 右上角进度环：环形进度条 + 中心百分数（滚动/翻页两种模式通用） */
+	private progressEl!: HTMLElement;
+	private progressArcEl!: SVGCircleElement;
+	private progressNumEl!: HTMLElement;
 	/** 页脚角标：右下章节页码（翻页模式；滚动模式隐藏） */
 	private pageEl!: HTMLElement;
 	private titleEl!: HTMLElement;
@@ -256,8 +263,6 @@ export class EpubReaderView extends FileView {
 		seg.appendChild(this.modeBtnScroll);
 		seg.appendChild(this.modeBtnPage);
 
-		this.percentEl = createSpan('fleur-epub-percent');
-
 		// 对照翻译开关（与 Aa 并置）：外语→现代中文 / 文言→白话，AI 自动识别语言
 		const trBtn = createSpan('fleur-epub-bar-btn fleur-epub-bar-btn-translate');
 		trBtn.setText('译');
@@ -335,12 +340,14 @@ export class EpubReaderView extends FileView {
 		this.contentEl.appendChild(bar);
 		this.contentEl.appendChild(this.readerEl);
 
-		// 页脚角标（微信读书式）：左下阅读进度百分比、右下章节页码（仅翻页模式显示）
+		// 页脚角标：右下章节页码（仅翻页模式显示；滚动模式 CSS 隐藏）
 		const badges = createDiv('fleur-epub-pagebadges');
-		badges.appendChild(this.percentEl);
 		this.pageEl = createSpan('fleur-epub-pagenum');
 		badges.appendChild(this.pageEl);
 		this.readerEl.appendChild(badges);
+
+		// 右上角进度环（阅读区浮层）：环形进度 + 中心百分数，滚动/翻页都可见
+		this.readerEl.appendChild(this.buildProgressRing());
 
 		// 宿主侧键盘翻页（焦点在宿主时生效；iframe 内的由 bindDocEvents 覆盖）
 		this.contentEl.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -385,6 +392,52 @@ export class EpubReaderView extends FileView {
 		this.fsBtn?.toggleClass('is-active', on);
 	}
 
+	/**
+	 * 右上角进度环：细描边环 + 中心百分数。
+	 * 放阅读区浮层而非页脚，是为了滚动模式也有进度可看（翻页模式另在右下角显示章节页码）。
+	 */
+	private buildProgressRing(): HTMLElement {
+		const wrap = createDiv('fleur-epub-progress');
+		wrap.setAttribute('role', 'img');
+		wrap.setAttribute('aria-label', '阅读进度');
+		const NS = 'http://www.w3.org/2000/svg';
+		const svg = document.createElementNS(NS, 'svg');
+		svg.setAttribute('viewBox', '0 0 36 36');
+		svg.setAttribute('aria-hidden', 'true');
+		const mkCircle = (cls: string): SVGCircleElement => {
+			const c = document.createElementNS(NS, 'circle') as SVGCircleElement;
+			c.setAttribute('class', cls);
+			c.setAttribute('cx', '18');
+			c.setAttribute('cy', '18');
+			c.setAttribute('r', String(RING_RADIUS));
+			return c;
+		};
+		const track = mkCircle('fleur-epub-progress-track');
+		const arc = mkCircle('fleur-epub-progress-arc');
+		arc.setAttribute('stroke-dasharray', String(RING_CIRCUMFERENCE));
+		arc.setAttribute('stroke-dashoffset', String(RING_CIRCUMFERENCE));
+		svg.appendChild(track);
+		svg.appendChild(arc);
+		wrap.appendChild(svg);
+		this.progressNumEl = createSpan('fleur-epub-progress-num');
+		this.progressNumEl.setText('0');
+		wrap.appendChild(this.progressNumEl);
+		this.progressArcEl = arc;
+		this.progressEl = wrap;
+		return wrap;
+	}
+
+	/** 刷新进度环（percent：0–100；首次收到位置后才显形，避免开书瞬间闪 0） */
+	private setProgress(percent: number): void {
+		const p = Math.max(0, Math.min(100, Math.round(percent)));
+		if (this.progressArcEl) {
+			this.progressArcEl.style.strokeDashoffset = String(RING_CIRCUMFERENCE * (1 - p / 100));
+		}
+		this.progressNumEl?.setText(String(p));
+		this.progressEl?.setAttribute('aria-label', `阅读进度 ${p}%`);
+		this.progressEl?.addClass('is-ready');
+	}
+
 	/** Obsidian 打开 .epub 文件时的入口 */
 	async onLoadFile(file: TFile): Promise<void> {
 		// 同一文件已加载则跳过（leaf 复用 / 重渲染场景）
@@ -424,7 +477,7 @@ export class EpubReaderView extends FileView {
 			view.addEventListener('relocate', (e: CustomEvent) => {
 				const d = e.detail ?? {};
 				const percent = typeof d.fraction === 'number' ? Math.round(d.fraction * 100) : undefined;
-				if (percent !== undefined) this.percentEl.setText(`${percent}%`);
+				if (percent !== undefined) this.setProgress(percent);
 				// 章节页码（右下角标）：foliate 的 pages 含首尾 2 个空列，实际页数 = pages - 2
 				const r = view.renderer;
 				if (r && typeof r.page === 'number' && typeof r.pages === 'number' && r.pages > 2) {

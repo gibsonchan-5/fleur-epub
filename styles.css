@@ -150,18 +150,64 @@
 	right: 0;
 	bottom: calc(6px + var(--fleur-epub-safe-bottom, 0px));
 	display: flex;
-	justify-content: space-between;
+	/* 进度环已移到右上角，这一行只剩右下角页码 → 贴右对齐 */
+	justify-content: flex-end;
 	align-items: center;
 	padding: 0 14px;
 	pointer-events: none;
 	z-index: 30;
 }
 
-.fleur-epub-percent {
+/* 右上角进度环：细描边圆环 + 中心百分数。
+   放阅读区（而非页脚）→ 滚动/翻页两种模式都能看到阅读进度；
+   翻页模式的章节页码仍在右下角（.fleur-epub-pagenum）。 */
+.fleur-epub-progress {
+	position: absolute;
+	top: 10px;
+	right: 12px;
+	width: 36px;
+	height: 36px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 50%;
+	/* 不透明底 + 主题色：压在正文上也清晰，且与页面底色融合不抢眼 */
+	background: var(--fleur-epub-reader-bg);
+	box-shadow: 0 0 0 1px var(--fleur-epub-seg-bg);
+	pointer-events: none;
+	z-index: 30;
+	opacity: 0;
+	transition: opacity 0.25s ease, top 0.22s ease;
+}
+.fleur-epub-progress.is-ready {
+	opacity: 0.82;
+}
+.fleur-epub-progress svg {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	transform: rotate(-90deg);
+}
+.fleur-epub-progress-track {
+	fill: none;
+	stroke: var(--fleur-epub-seg-bg);
+	stroke-width: 2.5;
+}
+.fleur-epub-progress-arc {
+	fill: none;
+	stroke: var(--fleur-epub-accent);
+	stroke-width: 2.5;
+	stroke-linecap: round;
+	transition: stroke-dashoffset 0.3s ease;
+}
+.fleur-epub-progress-num {
+	font-size: 10px;
+	font-weight: 600;
+	line-height: 1;
 	color: var(--fleur-epub-text-muted);
-	font-size: 11.5px;
 	font-variant-numeric: tabular-nums;
-	opacity: 0.85;
+	/* 数字不带 % 号，留出呼吸感；语义完整度由 aria-label 承担 */
 }
 
 .fleur-epub-pagenum {
@@ -1680,9 +1726,28 @@ body.fleur-epub-mobile .fleur-epub-pagebadges {
 	padding: 0 16px;
 	bottom: calc(8px + var(--fleur-epub-safe-bottom, 0px));
 }
-body.fleur-epub-mobile .fleur-epub-percent,
 body.fleur-epub-mobile .fleur-epub-pagenum {
 	font-size: 12px;
+}
+
+/* 移动端进度环：顶栏是绝对定位浮层（48px），环默认让开；
+   chrome 收起时自动上移到角落（过渡跟随顶栏动画节奏） */
+body.fleur-epub-mobile .fleur-epub-progress {
+	top: calc(48px + 10px);
+	right: 12px;
+	width: 40px;
+	height: 40px;
+}
+body.fleur-epub-mobile .fleur-epub-root.is-chrome-hidden .fleur-epub-progress {
+	top: calc(var(--fleur-epub-safe-top, 0px) + 12px);
+}
+body.fleur-epub-mobile .fleur-epub-progress-num {
+	font-size: 10.5px;
+}
+
+/* 沉浸全屏：进度环同样让开系统状态栏 */
+body.fleur-epub-immersive .fleur-epub-root .fleur-epub-progress {
+	top: calc(var(--fleur-epub-safe-top, 0px) + 12px);
 }
 
 /* Aa 外观面板：窄屏（<360px 视口）不溢出 */
