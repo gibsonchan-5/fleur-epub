@@ -5,7 +5,7 @@
 //   - 翻页模式：右击下一页、左击上一页（点按区域，不干扰选段），支持方向键
 // 继承 FileView：registerExtensions 接管 .epub 后，Obsidian 打开文件时回调 onLoadFile。
 
-import { EventRef, FileView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
+import { EventRef, FileView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { computeFingerprint, type BookData, type BookMeta, type EpubAnnotation, type AnnotationKind } from './store';
 import { Overlayer } from '../vendor/foliate-js/overlayer.js';
@@ -1575,19 +1575,42 @@ export class EpubReaderView extends FileView {
 		}
 
 		if (mobile) {
-			// 移动端：统一「底部居中悬浮」（微信读书同款位置）。
-			// 不再浮在选段旁：锚定选段时若选段靠左/靠右，工具条会被夹到屏幕边缘，
-			// 另一侧就空出一大片（用户反馈「右侧留白太大」）；iOS 上还会与系统
-			// 选择菜单打架。固定居中后位置可预期，也不再受选段位置影响。
-			// 用两次 rAF：首次布局后字号/图标可能才落定，宽度取最终值才能精确居中。
+			// 移动端：尽量贴着选中文本——优先浮在选段正上方，上方放不下换到下方，
+			// 上下都放不下才回退底部固定。
+			// 例外（iOS）：系统选择菜单（拷贝/查询/翻译…）悬浮在选段上方，本地工具条
+			// 同样贴近选段必然与它打架 → 常驻底部居中（微信读书同款位置），互不相扰。
+			// 两次 rAF：首帧字号/图标未落定时量到的宽度会偏大，位置会算歪。
 			window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
 				const bw = bar.offsetWidth;
-				const left = Math.max(8, (window.innerWidth - bw) / 2);
-				bar.setCssStyles({
-					left: `${left}px`,
-					top: 'auto',
-					bottom: 'calc(72px + var(--fleur-epub-safe-bottom, 0px))',
-				});
+				const bh = bar.offsetHeight;
+				const margin = 8;
+				if (Platform.isIosApp) {
+					const left = Math.max(margin, (window.innerWidth - bw) / 2);
+					bar.setCssStyles({
+						left: `${left}px`,
+						top: 'auto',
+						bottom: 'calc(72px + var(--fleur-epub-safe-bottom, 0px))',
+					});
+					return;
+				}
+				let left = host.x + anchorRect.width / 2 - bw / 2;
+				left = Math.max(margin, Math.min(left, window.innerWidth - bw - margin));
+				const topAbove = host.y - bh - 10;
+				const topBelow = host.y + anchorRect.height + 10;
+				if (topAbove >= margin + 48) {
+					// 上方空间充足（避开顶栏 48px）
+					bar.setCssStyles({ left: `${left}px`, top: `${topAbove}px`, bottom: 'auto' });
+				} else if (topBelow + bh + margin <= window.innerHeight - 72) {
+					// 下方空间充足（避开底部工具栏 72px）
+					bar.setCssStyles({ left: `${left}px`, top: `${topBelow}px`, bottom: 'auto' });
+				} else {
+					// 上下都放不下（选段顶到边）→ 回退底部固定
+					bar.setCssStyles({
+						left: `${left}px`,
+						top: 'auto',
+						bottom: 'calc(72px + var(--fleur-epub-safe-bottom, 0px))',
+					});
+				}
 			}));
 			return;
 		}
