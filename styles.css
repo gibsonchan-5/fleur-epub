@@ -2005,6 +2005,29 @@ body.fleur-epub-mobile .fleur-ai-panel--mobile .fleur-ai-header {
 	height: 18px;
 }
 
+/* 图标免疫：面板内图标是 stroke 型 SVG，stroke="currentColor" 属于 SVG 表现属性，
+   优先级低于任何 CSS 规则——部分主题的 svg/button svg 规则会把描边清掉，
+   表现为按钮全是空白方块（文本 × 不受影响）。这里用显式 CSS 接管描边与填充。 */
+body .fleur-ai-panel svg,
+body .fleur-ai-panel button svg {
+	stroke: currentColor;
+	fill: none;
+}
+body .fleur-ai-panel .fleur-ai-action-btn,
+body .fleur-ai-panel .fleur-ai-expand-btn,
+body .fleur-ai-panel .fleur-ai-close-btn {
+	color: var(--text-muted);
+	background: transparent;
+	border: none;
+	box-shadow: none;
+}
+body .fleur-ai-panel .fleur-ai-send-btn {
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	box-shadow: none;
+	border: none;
+}
+
 /* ── M4 面板移动化：Aa 外观面板 bottom sheet 形态 ── */
 body.fleur-epub-mobile .fleur-epub-appear--sheet {
 	position: fixed;

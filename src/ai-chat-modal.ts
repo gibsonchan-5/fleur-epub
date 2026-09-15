@@ -182,7 +182,8 @@ export class AIChatPanel {
     }
     if (this.followUpInput) {
       this.followUpInput.placeholder = '向阅读助手提问…';
-      this.followUpInput.focus();
+      // 移动端不自动聚焦：平板上 focus 会立即弹出系统键盘，盖住卡片
+      if (!isMobileUI(this.plugin)) this.followUpInput.focus();
     }
     if (this.bodyEl && !this.bodyEl.hasChildNodes()) {
       const hint = this.bodyEl.createDiv();
@@ -424,7 +425,8 @@ export class AIChatPanel {
     await this.doStream();
 
     this.followUpInput!.disabled = false;
-    this.followUpInput!.focus();
+    // 移动端不自动聚焦，避免平板强制弹键盘
+    if (!isMobileUI(this.plugin)) this.followUpInput!.focus();
   }
 
   /** 发送或中断按钮点击处理 */
@@ -513,7 +515,8 @@ export class AIChatPanel {
 
       this.scrollToBottom();
       this.followUpInput!.disabled = false;
-      this.followUpInput!.focus();
+      // 移动端不自动聚焦，避免平板强制弹键盘
+      if (!isMobileUI(this.plugin)) this.followUpInput!.focus();
     };
 
     await aiService.streamChat(
