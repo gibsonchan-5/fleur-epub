@@ -2539,6 +2539,10 @@ export class EpubReaderView extends FileView {
 			this.bookData = null;
 		}
 		try {
+			// foliate-view 的 View 只有 close()（销毁 renderer 并移除元素），没有 destroy()；
+			// 之前只调 destroy?.() 是静默 no-op，paginator 从未销毁，关书后布局变化仍会
+			// 触发 render → columnize 读到 null documentElement（连弹 err toast 的根因）
+			this.foliateView?.close?.();
 			await this.foliateView?.destroy?.();
 		} catch { /* 忽略销毁异常 */ }
 		this.foliateView = null;

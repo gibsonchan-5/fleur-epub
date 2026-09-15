@@ -342,6 +342,8 @@ class View {
     scrolled({ gap, columnWidth }) {
         const vertical = this.#vertical
         const doc = this.document
+        // fleur-epub patch: 关书后 iframe 分离、contentDocument 为 null，直接返回
+        if (!doc || !doc.body) return
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'padding': vertical ? `${gap}px 0` : `0 ${gap}px`,
@@ -361,6 +363,8 @@ class View {
         this.#size = vertical ? height : width
 
         const doc = this.document
+        // fleur-epub patch: 关书后 iframe 分离、contentDocument 为 null，直接返回
+        if (!doc || !doc.body) return
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'column-width': `${Math.trunc(columnWidth)}px`,
@@ -392,6 +396,8 @@ class View {
         const { width, height, margin } = this.#layout
         const vertical = this.#vertical
         const doc = this.document
+        // fleur-epub patch: 关书后无文档可设置
+        if (!doc || !doc.body) return
         for (const el of doc.body.querySelectorAll('img, svg, video')) {
             // preserve max size if they are already set
             const { maxHeight, maxWidth } = doc.defaultView.getComputedStyle(el)
@@ -482,6 +488,8 @@ export class Paginator extends HTMLElement {
     ]
     #root = this.attachShadow({ mode: 'closed' })
     #observer = new ResizeObserver(() => this.render())
+    // fleur-epub patch: 关书后置真，阻断在途 #display 复活僵尸视图
+    #destroyed = false
     #top
     #background
     #container
@@ -694,7 +702,8 @@ export class Paginator extends HTMLElement {
         })
 
         this.#mediaQueryListener = () => {
-            if (!this.#view) return
+            // fleur-epub patch: 关书后 document 可能为 null
+            if (!this.#view?.document) return
             this.#background.style.setProperty('background', getBackground(this.#view.document))
         }
         this.#mediaQuery.addEventListener('change', this.#mediaQueryListener)
@@ -1099,12 +1108,14 @@ export class Paginator extends HTMLElement {
     }
     async #display(promise) {
         const { index, src, anchor, onLoad, select } = await promise
+        // fleur-epub patch: 章节解析期间书可能已被关闭
+        if (this.#destroyed) return
         this.#index = index
         const hasFocus = this.#view?.document?.hasFocus()
         if (src) {
             const view = this.#createView(this.scrolled)
             const afterLoad = doc => {
-                if (doc.head) {
+                if (doc?.head) {
                     const $styleBefore = doc.createElement('style')
                     doc.head.prepend($styleBefore)
                     const $style = doc.createElement('style')
@@ -1115,6 +1126,11 @@ export class Paginator extends HTMLElement {
             }
             const beforeRender = this.#beforeRender.bind(this)
             await view.load(src, afterLoad, beforeRender)
+            // fleur-epub patch: 加载期间书被关闭——销毁孤儿视图，禁止复活 #view
+            if (this.#destroyed) {
+                try { view.destroy() } catch { /* noop */ }
+                return
+            }
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
                     doc: view.document, index,
@@ -1130,6 +1146,8 @@ export class Paginator extends HTMLElement {
                 oldView.destroy()
             }
         }
+        // fleur-epub patch: 无视图（加载失败/已销毁）时不做锚点定位
+        if (!this.#view) return
         await this.scrollToAnchor((typeof anchor === 'function'
             ? anchor(this.#view.document) : anchor) ?? 0, select)
         if (hasFocus) this.focusView()
@@ -1252,18 +1270,23 @@ export class Paginator extends HTMLElement {
         } else $style.textContent = styles
 
         // NOTE: needs `requestAnimationFrame` in Chromium
-        requestAnimationFrame(() =>
-            this.#background.style.setProperty('background', getBackground(this.#view.document)))
+        // fleur-epub patch: rAF 回调可能晚于关书执行，须重新校验 #view 与 document
+        requestAnimationFrame(() => {
+            if (this.#view?.document)
+                this.#background.style.setProperty('background', getBackground(this.#view.document))
+        })
 
         // needed because the resize observer doesn't work in Firefox
         this.#view?.document?.fonts?.ready?.then(() => this.#view.expand())
     }
     focusView() {
-        this.#view.document.defaultView.focus()
+        this.#view?.document?.defaultView?.focus()
     }
     destroy() {
+        // fleur-epub patch: 标记已销毁，避免在途 #display 在关书后把新 view 挂回 #view
+        this.#destroyed = true
         this.#observer.unobserve(this)
-        this.#view.destroy()
+        this.#view?.destroy?.()
         this.#view = null
         this.sections[this.#index]?.unload?.()
         this.#mediaQuery.removeEventListener('change', this.#mediaQueryListener)

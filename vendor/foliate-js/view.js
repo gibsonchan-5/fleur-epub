@@ -317,6 +317,8 @@ export class View extends HTMLElement {
         this.#emit('relocate', this.lastLocation)
     }
     #onLoad({ doc, index }) {
+        // fleur-epub patch: 关书后迟到的 load 事件可能携带 null doc，直接跳过
+        if (!doc) return
         // set language and dir if not already set
         doc.documentElement.lang ||= this.language.canonical ?? ''
         if (!this.language.isCJK)
