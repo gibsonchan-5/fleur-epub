@@ -5,7 +5,7 @@
 //   - 翻页模式：右击下一页、左击上一页（点按区域，不干扰选段），支持方向键
 // 继承 FileView：registerExtensions 接管 .epub 后，Obsidian 打开文件时回调 onLoadFile。
 
-import { EventRef, FileView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
+import { EventRef, FileView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { computeFingerprint, type BookData, type BookMeta, type EpubAnnotation, type AnnotationKind } from './store';
 import { Overlayer } from '../vendor/foliate-js/overlayer.js';
@@ -1521,6 +1521,18 @@ export class EpubReaderView extends FileView {
 				const bw = bar.offsetWidth;
 				const bh = bar.offsetHeight;
 				const margin = 8;
+				// iOS：系统选择菜单（拷贝/查询/翻译…）悬浮在选段上方，本地工具条若
+				// 同样贴近选段必然与它打架（截图实测重叠）；改为常驻底部居中
+				// （微信读书同款位置），与系统菜单互不相扰。
+				if (Platform.isIosApp) {
+					const left = Math.max(margin, (window.innerWidth - bw) / 2);
+					bar.setCssStyles({
+						left: `${left}px`,
+						top: 'auto',
+						bottom: 'calc(72px + var(--fleur-epub-safe-bottom, 0px))',
+					});
+					return;
+				}
 				let left = host.x + anchorRect.width / 2 - bw / 2;
 				left = Math.max(margin, Math.min(left, window.innerWidth - bw - margin));
 				const topAbove = host.y - bh - 10;

@@ -1611,6 +1611,29 @@ body.fleur-epub-mobile .fleur-epub-bar {
 	z-index: 40;
 }
 
+/* 沉浸全屏 v2：阅读根元素脱离 Obsidian 文档流，fixed 铺满整个视口。
+   仅 display:none 头部不够——iOS / 安卓平板的容器仍有安全区 padding 与
+   布局残留（表现为沉浸后顶部一大片空白）；fixed 定位不依赖父级布局，
+   无论宿主怎么排都真正铺满。 */
+body.fleur-epub-immersive .fleur-epub-root {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	/* 宿主可能给过显式高度（像素值）：显式 height 会压过 bottom 拉伸，置 auto 交给 top/bottom */
+	height: auto;
+	z-index: 999;
+	background: var(--background-primary);
+}
+/* 沉浸下顶栏与正文退到系统状态栏之下（safe-top 非刘海/安卓平板为 0，即真全屏） */
+body.fleur-epub-immersive .fleur-epub-root .fleur-epub-bar {
+	top: var(--fleur-epub-safe-top, 0px);
+}
+body.fleur-epub-immersive .fleur-epub-root .fleur-epub-reader {
+	padding-top: var(--fleur-epub-safe-top, 0px);
+}
+
 /* 沉浸全屏按钮 */
 body.fleur-epub-mobile .fleur-epub-bar-btn-fs {
 	display: inline-flex;
