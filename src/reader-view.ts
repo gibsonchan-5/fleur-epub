@@ -478,7 +478,10 @@ export class EpubReaderView extends FileView {
 			const cfi = this.bookData.progress?.cfi;
 			const watchdog = window.setTimeout(() => {
 				if (!firstLoad) {
-					stage('③ 渲染超时：章节 iframe 15s 未加载（怀疑移动端拦截 blob iframe）', true);
+					// 诊断链：vendor load() 埋点（blob/srcdoc 路径选择、fetch、srcdoc 设置）
+					const chain = (window as any).__fleur_epub_diag as string[] | undefined;
+					const tail = chain?.length ? `\n${chain.slice(-6).join('\n')}` : '\n[诊断链为空：srcdoc 分支未执行]';
+					stage(`③ 渲染超时：章节 iframe 15s 未加载${tail}`, true);
 				}
 			}, 15000);
 			if (cfi) {
@@ -687,7 +690,7 @@ export class EpubReaderView extends FileView {
 		const entry = contents.find((c) => c.index === cur) ?? contents[0];
 		const doc = entry.doc;
 		const lang =
-			doc.documentElement?.getAttribute('lang') ||
+			doc?.documentElement?.getAttribute('lang') ||
 			String((view?.book?.metadata as any)?.language ?? '');
 		const blocks = Array.from(
 			doc.body?.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, dd, dt') ?? [],

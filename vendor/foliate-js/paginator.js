@@ -285,11 +285,42 @@ class View {
             // inject via srcdoc instead: the srcdoc document inherits the
             // parent origin (iframe is sandboxed with allow-same-origin), so
             // the blob: subresource URLs inside still resolve normally.
+            // Every step is logged into window.__fleur_epub_diag so the
+            // app-level watchdog can surface the exact failing step on
+            // devices without a console.
             if (src.startsWith('blob:') && document.body?.classList.contains('fleur-epub-mobile')) {
+                const diag = m => {
+                    try {
+                        (window.__fleur_epub_diag ??= []).push(m)
+                        console.warn('[FleurEPUB]', m)
+                    } catch (e) { /* noop */ }
+                }
+                diag(`load: srcdoc path start (${src.length} chars)`)
+                const applySrcdoc = html => {
+                    diag(`load: srcdoc set (${html?.length ?? 0} chars)`)
+                    this.#iframe.srcdoc = html
+                }
                 fetch(src)
                     .then(res => res.text())
-                    .then(html => { this.#iframe.srcdoc = html })
-                    .catch(() => { this.#iframe.srcdoc = '' })
+                    .then(applySrcdoc)
+                    .catch(e1 => {
+                        // text() fetch can also fail on odd WebViews — retry
+                        // with Blob + FileReader (wider support), then empty
+                        diag(`load: text fetch failed (${e1}), retry via FileReader`)
+                        fetch(src)
+                            .then(res => res.blob())
+                            .then(b => new Promise((res2, rej2) => {
+                                const fr = new FileReader()
+                                fr.onload = () => res2(String(fr.result))
+                                fr.onerror = () => rej2(fr.error)
+                                fr.readAsText(b)
+                            }))
+                            .then(applySrcdoc)
+                            .catch(e2 => {
+                                diag(`load: FileReader fetch failed (${e2}), empty srcdoc`)
+                                this.#iframe.srcdoc = ''
+                            })
+                    })
             } else {
                 this.#iframe.src = src
             }
