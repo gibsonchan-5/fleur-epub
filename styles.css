@@ -1484,6 +1484,39 @@ body.fleur-epub-mobile .fleur-epub-root {
 	--fleur-epub-safe-top: env(safe-area-inset-top, 0px);
 	/* 触屏点按不出现高亮闪烁块 */
 	-webkit-tap-highlight-color: transparent;
+	/* 顶栏改浮层定位的包含块 */
+	position: relative;
+}
+
+/* 顶栏浮层化：隐藏时不再占布局空间，阅读区直接顶到 Obsidian 头部之下，
+   消除 chrome 收起后的顶部空洞（微信读书为覆盖式工具栏） */
+body.fleur-epub-mobile .fleur-epub-bar {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	z-index: 40;
+}
+
+/* 沉浸全屏按钮 */
+body.fleur-epub-mobile .fleur-epub-bar-btn-fs {
+	display: inline-flex;
+	align-items: center;
+}
+body.fleur-epub-mobile .fleur-epub-bar-btn-fs .fleur-epub-bar-btn-icon svg {
+	width: 16px;
+	height: 16px;
+}
+body.fleur-epub-mobile .fleur-epub-bar-btn-fs.is-active {
+	color: var(--fleur-epub-accent);
+}
+
+/* 沉浸全屏（body 类仅在我们的阅读视图激活期间挂载）：
+   隐藏 Obsidian 移动端顶部导航（平板 tab 头 / 手机 navbar / view 头） */
+body.fleur-epub-immersive .mobile-tab-header,
+body.fleur-epub-immersive .mobile-navbar,
+body.fleur-epub-immersive .view-header {
+	display: none !important;
 }
 
 /* 顶栏：高度 48px，触控目标 ≥ 32px，间距收紧 */

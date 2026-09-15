@@ -5,7 +5,7 @@
 //   - 翻页模式：右击下一页、左击上一页（点按区域，不干扰选段），支持方向键
 // 继承 FileView：registerExtensions 接管 .epub 后，Obsidian 打开文件时回调 onLoadFile。
 
-import { FileView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
+import { EventRef, FileView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { computeFingerprint, type BookData, type BookMeta, type EpubAnnotation, type AnnotationKind } from './store';
 import { Overlayer } from '../vendor/foliate-js/overlayer.js';
@@ -193,6 +193,10 @@ export class EpubReaderView extends FileView {
 	private ttsHighlightSpans: HTMLSpanElement[] = [];
 	/** TTS 状态订阅取消函数（onClose 时解绑） */
 	private ttsUnsub: (() => void) | null = null;
+	/** 沉浸全屏状态 + 顶栏按钮 + 自动退出订阅 */
+	private immersive = false;
+	private fsBtn: HTMLElement | null = null;
+	private leafChangeRef: EventRef | null = null;
 	/** 桌面端听书播放器 Modal（关闭仅收起面板，朗读继续） */
 	private ttsModal: TTSPlayerModal | null = null;
 
@@ -295,6 +299,20 @@ export class EpubReaderView extends FileView {
 
 		right.appendChild(trBtn);
 		if (this.ttsBtn) right.appendChild(this.ttsBtn);
+
+		// 沉浸全屏（仅移动端）：隐藏 Obsidian 移动端顶部导航，阅读区铺满整屏
+		if (isMobileUI(this.plugin)) {
+			const fsBtn = createSpan('fleur-epub-bar-btn fleur-epub-bar-btn-fs');
+			setIcon(fsBtn.createSpan('fleur-epub-bar-btn-icon'), 'maximize');
+			fsBtn.setAttribute('aria-label', '沉浸全屏');
+			fsBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				this.setImmersive(!this.immersive);
+			});
+			this.fsBtn = fsBtn;
+			right.appendChild(fsBtn);
+		}
+
 		right.appendChild(seg);
 		right.appendChild(this.percentEl);
 		bar.appendChild(this.titleEl);
@@ -325,7 +343,19 @@ export class EpubReaderView extends FileView {
 			this.chrome = new MobileChrome(this);
 			this.contentEl.appendChild(this.chrome.toolbarEl);
 			this.contentEl.addClass('is-chrome-hidden');
+			// 沉浸全屏自动退出：切到其它视图/面板时撤掉全局隐藏类，避免影响其它界面
+			this.leafChangeRef = this.app.workspace.on('active-leaf-change', () => {
+				if (!this.immersive) return;
+				if (this.app.workspace.getActiveViewOfType(EpubReaderView) !== this) this.setImmersive(false);
+			});
 		}
+	}
+
+	/** 沉浸全屏：隐藏 Obsidian 移动端顶部导航（navbar / tab 头 / view 头），阅读区铺满 */
+	setImmersive(on: boolean): void {
+		this.immersive = on;
+		document.body.toggleClass('fleur-epub-immersive', on);
+		this.fsBtn?.toggleClass('is-active', on);
 	}
 
 	/** Obsidian 打开 .epub 文件时的入口 */
@@ -2200,6 +2230,11 @@ export class EpubReaderView extends FileView {
 	}
 
 	async onClose(): Promise<void> {
+		this.setImmersive(false);
+		if (this.leafChangeRef) {
+			this.app.workspace.offref(this.leafChangeRef);
+			this.leafChangeRef = null;
+		}
 		this.ttsModal?.close();
 		this.ttsModal = null;
 		this.ttsUnsub?.();

@@ -51,6 +51,11 @@ export class MobileChrome {
 
 	// ── 显隐状态机 ──
 
+	/** 最近一次显式呼出时间：宽限期内忽略 relocate/scroll 的自动收起
+	 *  （开书时恢复进度、字体加载 expand 等迟到的 relocate 会把刚弹出的工具栏闪掉） */
+	private shownAt = 0;
+	private static readonly SHOW_GRACE_MS = 800;
+
 	toggle(): void {
 		if (this.visible) this.hide();
 		else this.show();
@@ -58,6 +63,7 @@ export class MobileChrome {
 
 	show(): void {
 		this.visible = true;
+		this.shownAt = Date.now();
 		this.view.contentEl.removeClass('is-chrome-hidden');
 	}
 
@@ -72,14 +78,14 @@ export class MobileChrome {
 		return !this.sheetOpen;
 	}
 
-	/** 翻页 / 跳转 relocate 时调用：空闲则收起（微信读书行为） */
+	/** 翻页 / 跳转 relocate 时调用：空闲则收起（微信读书行为）；宽限期内不收 */
 	onRelocate(): void {
-		if (this.visible && this.isIdle()) this.hide();
+		if (this.visible && this.isIdle() && Date.now() - this.shownAt > MobileChrome.SHOW_GRACE_MS) this.hide();
 	}
 
-	/** 滚动模式内容滚动时调用：空闲则收起 */
+	/** 滚动模式内容滚动时调用：空闲则收起；宽限期内不收 */
 	onContentScroll(): void {
-		if (this.visible && this.isIdle()) this.hide();
+		if (this.visible && this.isIdle() && Date.now() - this.shownAt > MobileChrome.SHOW_GRACE_MS) this.hide();
 	}
 
 	destroy(): void {
