@@ -1510,6 +1510,8 @@ export class EpubReaderView extends FileView {
 
 		const bar = document.body.createDiv(mobile ? 'fleur-epub-mselbar' : 'fleur-epub-selbar');
 		this.selToolbar = bar;
+		// 落位前先隐形：工具条默认会贴在 CSS 的 bottom 处，等定位算完再显形，避免闪位
+		if (mobile) bar.setCssStyles({ visibility: 'hidden' });
 
 		const press = (el: HTMLElement) => el.addEventListener('mousedown', (e) => e.preventDefault());
 
@@ -1575,43 +1577,59 @@ export class EpubReaderView extends FileView {
 		}
 
 		if (mobile) {
-			// 移动端：尽量贴着选中文本——优先浮在选段正上方，上方放不下换到下方，
-			// 上下都放不下才回退底部固定。
-			// 例外（iOS）：系统选择菜单（拷贝/查询/翻译…）悬浮在选段上方，本地工具条
-			// 同样贴近选段必然与它打架 → 常驻底部居中（微信读书同款位置），互不相扰。
-			// 两次 rAF：首帧字号/图标未落定时量到的宽度会偏大，位置会算歪。
-			window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+			// 移动端落位：优先贴着选中文本，并避开各平台的原生选择菜单。
+			//
+			// iOS 的原生菜单（拷贝/查询/翻译…）由 WKWebView 外层绘制：网页侧既读不到
+			// 它的位置，也无法往里注入自定义项（那需要 App 层的 UIMenuController）。
+			// 只能按摆法规避——iOS 菜单默认浮在选段「上方」，所以：
+			//   · iPhone（小屏，本来就没多少空间）：底部居中，拇指可达；
+			//   · iPad  ：贴着选段，优先放「选段下方」（与上方菜单天然错开）；
+			//             下方无空间时才回上方，并留 52pt 让开菜单。
+			// 安卓无系统选择菜单：维持原逻辑（上方 → 下方 → 底部兜底）。
+			//
+			// 两次 rAF：首帧字号/图标未落定时量到的宽度偏大，落位会算歪。
+			const place = () => {
+				if (this.selToolbar !== bar) return; // 已换成新的工具条 → 放弃本次落位
 				const bw = bar.offsetWidth;
 				const bh = bar.offsetHeight;
 				const margin = 8;
-				if (Platform.isIosApp) {
-					const left = Math.max(margin, (window.innerWidth - bw) / 2);
-					bar.setCssStyles({
-						left: `${left}px`,
+				const bottomDock = 'calc(72px + var(--fleur-epub-safe-bottom, 0px))';
+				const show = (styles: Record<string, string>) =>
+					bar.setCssStyles({ ...styles, visibility: '' });
+				const isIos = Platform.isIosApp;
+				if (isIos && !Platform.isTablet) {
+					// iPhone：底部居中
+					show({
+						left: `${Math.max(margin, (window.innerWidth - bw) / 2)}px`,
 						top: 'auto',
-						bottom: 'calc(72px + var(--fleur-epub-safe-bottom, 0px))',
+						bottom: bottomDock,
 					});
 					return;
 				}
 				let left = host.x + anchorRect.width / 2 - bw / 2;
 				left = Math.max(margin, Math.min(left, window.innerWidth - bw - margin));
-				const topAbove = host.y - bh - 10;
-				const topBelow = host.y + anchorRect.height + 10;
-				if (topAbove >= margin + 48) {
-					// 上方空间充足（避开顶栏 48px）
-					bar.setCssStyles({ left: `${left}px`, top: `${topAbove}px`, bottom: 'auto' });
-				} else if (topBelow + bh + margin <= window.innerHeight - 72) {
-					// 下方空间充足（避开底部工具栏 72px）
-					bar.setCssStyles({ left: `${left}px`, top: `${topBelow}px`, bottom: 'auto' });
+				const below = host.y + anchorRect.height + 10;
+				// iOS 上方要额外让开系统菜单（约 44–50pt 高）
+				const above = host.y - bh - (isIos ? 52 : 10);
+				const fitsBelow = below + bh + margin <= window.innerHeight - 72;
+				const fitsAbove = above >= margin + 48;
+				// iPad 优先下方（避开上方菜单）；安卓仍优先上方（更贴近选段起始位置）
+				const order = isIos ? [fitsBelow, fitsAbove] : [fitsAbove, fitsBelow];
+				const tops = isIos ? [below, above] : [above, below];
+				const idx = order.findIndex(Boolean);
+				if (idx >= 0) {
+					show({ left: `${left}px`, top: `${tops[idx]}px`, bottom: 'auto' });
 				} else {
-					// 上下都放不下（选段顶到边）→ 回退底部固定
-					bar.setCssStyles({
-						left: `${left}px`,
-						top: 'auto',
-						bottom: 'calc(72px + var(--fleur-epub-safe-bottom, 0px))',
-					});
+					show({ left: `${left}px`, top: 'auto', bottom: bottomDock });
 				}
-			}));
+			};
+			window.requestAnimationFrame(() =>
+				window.requestAnimationFrame(() => {
+					// iOS：再等 120ms，错开系统菜单的出现动画，避免同帧争位置
+					if (Platform.isIosApp) window.setTimeout(place, 120);
+					else place();
+				}),
+			);
 			return;
 		}
 		// 定位：可见选段上方居中；顶部放不下换到下方
