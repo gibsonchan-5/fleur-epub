@@ -317,6 +317,8 @@ export class EpubReaderView extends FileView {
 		}
 
 		right.appendChild(trBtn);
+		// 进度环与「译」并置（同一行）：顶栏内联，两种阅读模式都能看到全书进度
+		right.appendChild(this.buildProgressRing());
 		if (this.ttsBtn) right.appendChild(this.ttsBtn);
 
 		// 沉浸全屏（仅移动端）：隐藏 Obsidian 移动端顶部导航，阅读区铺满整屏
@@ -345,9 +347,6 @@ export class EpubReaderView extends FileView {
 		this.pageEl = createSpan('fleur-epub-pagenum');
 		badges.appendChild(this.pageEl);
 		this.readerEl.appendChild(badges);
-
-		// 右上角进度环（阅读区浮层）：环形进度 + 中心百分数，滚动/翻页都可见
-		this.readerEl.appendChild(this.buildProgressRing());
 
 		// 宿主侧键盘翻页（焦点在宿主时生效；iframe 内的由 bindDocEvents 覆盖）
 		this.contentEl.addEventListener('keydown', (e: KeyboardEvent) => {
