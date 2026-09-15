@@ -2179,18 +2179,47 @@ export class EpubReaderView extends FileView {
 
 	/** 提取脚注纯文本：按块级元素分段；剥掉回链小链接（↩ / 返回 / ↑ 等）避免噪声 */
 	private extractFootnoteText(el: Element): string {
-		const clone = el.cloneNode(true) as Element;
-		clone.querySelectorAll('a[href]').forEach((x) => {
-			const t = (x.textContent ?? '').trim();
-			// 仅剥回链符号（↩ ↑ ← 返回 等）；普通链接（哪怕短）保文字去壳，不丢内容
-			if (!t || /^[↩↑←⟲⌂🔙\s]+$/.test(t) || t === '返回') x.remove();
-			else x.replaceWith(...Array.from(x.childNodes));
-		});
-		const blocks = Array.from(clone.querySelectorAll('p, li, blockquote, dd, dt, h1, h2, h3, h4, h5, h6'));
-		const lines = blocks.length
-			? blocks.map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)
-			: [(clone.textContent ?? '').replace(/\s+/g, ' ').trim()];
-		return lines.filter(Boolean).join('\n');
+		const collect = (node: Element): string => {
+			const clone = node.cloneNode(true) as Element;
+			clone.querySelectorAll('a[href]').forEach((x) => {
+				const t = (x.textContent ?? '').trim();
+				// 仅剥回链符号（↩ ↑ ← 返回 等）；普通链接（哪怕短）保文字去壳，不丢内容
+				if (!t || /^[↩↑←⟲⌂🔙\s]+$/.test(t) || t === '返回') x.remove();
+				else x.replaceWith(...Array.from(x.childNodes));
+			});
+			const blocks = Array.from(clone.querySelectorAll('p, li, blockquote, dd, dt, h1, h2, h3, h4, h5, h6'));
+			const lines = blocks.length
+				? blocks.map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+				: [(clone.textContent ?? '').replace(/\s+/g, ' ').trim()];
+			return lines.filter(Boolean).join('\n');
+		};
+		// 纯序号形态：「(1)」「[2]」「*」「①」等——说明锚点落在词典 dt / 独立标记节点上
+		const isMarkerOnly = (t: string) => /^[(\[]?[0-9*†‡§①-⑳]{1,4}[)\].。]?$/.test(t.replace(/\s+/g, ''));
+		let text = collect(el).trim();
+		if (text && isMarkerOnly(text)) {
+			// 正文在相邻节点（dd / 下一段 / 下一个 li）——向后找最多 3 个兄弟
+			let sib = el.nextElementSibling;
+			for (let i = 0; sib && i < 3; i++) {
+				const t = collect(sib).trim();
+				if (t && !isMarkerOnly(t)) {
+					return `${text}\n${t}`;
+				}
+				sib = sib.nextElementSibling;
+			}
+			// 兜底：el 是包裹层的子标记（如 <li><sup id>…</sup></li>），从父层的下一个兄弟找
+			const parent = el.parentElement;
+			if (parent && parent !== el.ownerDocument?.body) {
+				let psib = parent.nextElementSibling;
+				for (let i = 0; psib && i < 3; i++) {
+					const t = collect(psib).trim();
+					if (t && !isMarkerOnly(t)) {
+						return `${text}\n${t}`;
+					}
+					psib = psib.nextElementSibling;
+				}
+			}
+		}
+		return text;
 	}
 
 	/** 脚注卡片（微信读书式）：标题 + 可滚动内容 + 「查看脚注位置」跳转（长尾注兜底） */
