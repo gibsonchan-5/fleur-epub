@@ -976,8 +976,8 @@ export class EpubReaderView extends FileView {
 				text-align: justify;
 				word-break: break-word;
 			}
-			/* 正文段落：两字首行缩进 + 可调段距（微信读书中文排版惯例） */
-			p { margin: 0 0 ${s.paraSpacing}em; text-indent: 2em; }
+			/* 正文段落：首行缩进两字（可切换顶格）+ 可调段距（微信读书中文排版惯例） */
+			p { margin: 0 0 ${s.paraSpacing}em; text-indent: ${s.paraIndent === false ? '0' : '2em'}; }
 			/* 标题层级：章节题醒目，小节题收敛 */
 			h1, h2, h3, h4, h5, h6 {
 				font-weight: ${w >= 700 ? 900 : 700};
@@ -1759,6 +1759,27 @@ export class EpubReaderView extends FileView {
 		}
 		renderWeight();
 
+		// ── 首行：缩进 / 顶格 ──
+		const indentRow = mkRow('首行');
+		const indentBtns: HTMLElement[] = [];
+		const INDENT_OPTS: Array<{ v: boolean; label: string }> = [
+			{ v: true, label: '缩进' },
+			{ v: false, label: '顶格' },
+		];
+		const renderIndent = () =>
+			indentBtns.forEach((x, i) => x.toggleClass('is-active', INDENT_OPTS[i].v === (s.paraIndent !== false)));
+		for (const o of INDENT_OPTS) {
+			const b = indentRow.createEl('button', 'fleur-epub-appear-mini');
+			b.setText(o.label);
+			b.addEventListener('click', () => {
+				s.paraIndent = o.v;
+				renderIndent();
+				persist();
+			});
+			indentBtns.push(b);
+		}
+		renderIndent();
+
 		// ── 行距 / 段距 / 页边距：滑杆 + 数值 ──
 		const mkSlider = (
 			label: string, min: number, max: number, step: number,
@@ -1802,10 +1823,12 @@ export class EpubReaderView extends FileView {
 			s.marginRight = 0;
 			s.fontFamily = '';
 			s.fontWeight = 400;
+			s.paraIndent = true;
 			s.theme = 'light';
 			fillFontOptions();
 			renderSize();
 			renderWeight();
+			renderIndent();
 			panel.findAll('.fleur-epub-appear-swatch').forEach((d) => d.toggleClass('is-active', d.dataset.theme === 'light'));
 			persist();
 		});

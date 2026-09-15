@@ -275,8 +275,8 @@
 	background: var(--background-modifier-hover);
 }
 
-/* 字重档位：选中态 accent 高亮 */
-.fleur-epub-appear-mini.is-weight.is-active {
+/* 档位按钮（字重 / 首行等）：选中态 accent 高亮 */
+.fleur-epub-appear-mini.is-active {
 	background: var(--interactive-accent);
 	border-color: var(--interactive-accent);
 	color: var(--text-on-accent);

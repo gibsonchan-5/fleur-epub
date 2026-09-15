@@ -30,6 +30,8 @@ export interface FleurEpubSettings {
 	lineHeight: number;
 	/** 段间距（em） */
 	paraSpacing: number;
+	/** 首行排版：true = 首行缩进两字（默认）/ false = 首行顶格（不缩进） */
+	paraIndent: boolean;
 	/** 正文字体（CSS font-family 栈；'' = 跟随 Obsidian 全局文本字体） */
 	fontFamily: string;
 	/** 正文字重：300 细 / 400 常规（默认）/ 500 中等 / 700 粗 */
@@ -76,6 +78,7 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	marginRight: 0,
 	lineHeight: 1.9,
 	paraSpacing: 0.85,
+	paraIndent: true,
 	fontFamily: '',
 	fontWeight: 400,
 	translationEngine: 'microsoft',
