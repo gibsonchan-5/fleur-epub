@@ -30,7 +30,7 @@ export interface FleurEpubSettings {
 	lineHeight: number;
 	/** 段间距（em） */
 	paraSpacing: number;
-	/** 正文字体（CSS font-family 栈；'' = 默认宋体栈） */
+	/** 正文字体（CSS font-family 栈；'' = 跟随 Obsidian 全局文本字体） */
 	fontFamily: string;
 	/** 正文字重：300 细 / 400 常规（默认）/ 500 中等 / 700 粗 */
 	fontWeight: number;

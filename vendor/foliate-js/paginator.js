@@ -16,6 +16,9 @@ const debounce = (f, wait, immediate) => {
 
 const lerp = (min, max, x) => x * (max - min) + min
 const easeOutQuad = x => 1 - (1 - x) * (1 - x)
+// fleur-epub patch: 翻页用 ease-in-out（起步加速→落位减速）。
+// easeOutQuad 起步即全速，点按翻页观感生硬；ease-in-out 更接近微信读书的手感。
+const easeInOutCubic = x => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2
 const animate = (a, b, duration, ease, render) => new Promise(resolve => {
     let start
     const step = now => {
@@ -492,6 +495,9 @@ export class Paginator extends HTMLElement {
     #scrollBounds
     #touchState
     #touchScrolled
+    // fleur-epub patch: 滚动模式章缘过冲累计（触摸端跨章），及跨章冷却时间戳
+    #edgeOverscroll = null
+    #edgeTouchCoolUntil = 0
     #lastVisibleRange
     constructor() {
         super()
@@ -600,7 +606,13 @@ export class Paginator extends HTMLElement {
         this.#footer = this.#root.getElementById('footer')
 
         this.#observer.observe(this.#container)
-        this.#container.addEventListener('scroll', () => this.dispatchEvent(new Event('scroll')))
+        this.#container.addEventListener('scroll', () => {
+            // fleur-epub patch: 章缘过冲累计仅在容器完全停住后仍继续拖拽时增长；
+            // 惯性滚动 / rubber-band 期间位置仍在变化（scroll 持续触发），一律清零，
+            // 防止「快速滚到章底的自然回弹」被误判为「继续拖拽跨章」。
+            if (this.#edgeOverscroll != null) this.#edgeOverscroll = null
+            this.dispatchEvent(new Event('scroll'))
+        })
         this.#container.addEventListener('scroll', debounce(() => {
             if (this.scrolled) {
                 if (this.#justAnchored) this.#justAnchored = false
@@ -658,9 +670,20 @@ export class Paginator extends HTMLElement {
                     this.#scrollToAnchor(selRange)
                 }
             })
-            doc.addEventListener('focusin', e => this.scrolled ? null :
+            // fleur-epub patch: 指针触发的 focusin（点按链接/脚注时目标获得焦点）
+            // 不得反抢导航滚动——点按链接会让 <a> 获得焦点，下方的 rAF 随后会把
+            // 视口拉回链接原位置，表现为「点了链接跳不过去、跳了又弹回来」
+            // （翻页模式专属：滚动模式本就跳过该逻辑）。键盘焦点移动（Tab 导航）保持跟随。
+            let pointerFocus = false
+            doc.addEventListener('pointerdown', () => { pointerFocus = true }, { capture: true })
+            doc.addEventListener('focusin', e => {
+                if (this.scrolled || pointerFocus) {
+                    pointerFocus = false
+                    return
+                }
                 // NOTE: `requestAnimationFrame` is needed in WebKit
-                requestAnimationFrame(() => this.#scrollToAnchor(e.target)))
+                requestAnimationFrame(() => this.#scrollToAnchor(e.target))
+            })
         })
 
         this.#mediaQueryListener = () => {
@@ -882,12 +905,36 @@ export class Paginator extends HTMLElement {
             t: e.timeStamp,
             vx: 0, xy: 0,
         }
+        // fleur-epub patch: 新手势开始，清空章缘过冲累计
+        this.#edgeOverscroll = null
     }
     #onTouchMove(e) {
         const state = this.#touchState
         if (state.pinched) return
         state.pinched = globalThis.visualViewport.scale > 1
-        if (this.scrolled || state.pinched) return
+        if (this.scrolled || state.pinched) {
+            // fleur-epub patch: 滚动模式章缘防卡（触摸端）——原生滚动到章底后仍向下拖 /
+            // 章顶后仍向上拖时，累计「过冲位移」；松手时超过阈值即跨到相邻章节。
+            // 对齐桌面端 wheel 章缘累计语义（见 reader-view 的 edgeAcc），避免滚动模式
+            // 「卡在章节末，无法进入下一章」。不影响原生滚动（不 preventDefault）。
+            const touch = e.changedTouches[0]
+            if (!touch || state.pinched) {
+                this.#edgeOverscroll = null
+                return
+            }
+            const dy = (state.y ?? touch.screenY) - touch.screenY // >0 = 手指上滑 = 向下滚
+            state.x = touch.screenX
+            state.y = touch.screenY
+            const dt = e.timeStamp - (state.t ?? e.timeStamp)
+            state.t = e.timeStamp
+            state.vy = dt > 0 ? dy / dt : 0
+            const atBottom = this.viewSize - this.end <= 2
+            const atTop = this.start <= 2
+            if ((atBottom && dy > 0) || (atTop && dy < 0))
+                this.#edgeOverscroll = (this.#edgeOverscroll ?? 0) + dy
+            else this.#edgeOverscroll = null
+            return
+        }
         if (e.touches.length > 1) {
             if (this.#touchScrolled) e.preventDefault()
             return
@@ -907,7 +954,22 @@ export class Paginator extends HTMLElement {
     }
     #onTouchEnd() {
         this.#touchScrolled = false
-        if (this.scrolled) return
+        if (this.scrolled) {
+            // fleur-epub patch: 章缘过冲达标 → 跨章（持续拖拽累计 ≥64px，或快速轻扫
+            // 位移 ≥24px 且速度 >0.45px/ms）。冷却 800ms 防止落位前二次触发连翻两章。
+            const acc = this.#edgeOverscroll
+            this.#edgeOverscroll = null
+            const now = performance.now()
+            const vy = Math.abs(this.#touchState?.vy ?? 0)
+            const hit = acc != null && (Math.abs(acc) >= 64
+                || (Math.abs(acc) >= 24 && vy > 0.45))
+            if (hit && now > this.#edgeTouchCoolUntil) {
+                this.#edgeTouchCoolUntil = now + 800
+                if (acc > 0) this.next()
+                else this.prev()
+            }
+            return
+        }
 
         // XXX: Firefox seems to report scale as 1... sometimes...?
         // at this point I'm basically throwing `requestAnimationFrame` at
@@ -953,14 +1015,19 @@ export class Paginator extends HTMLElement {
         }
         // FIXME: vertical-rl only, not -lr
         if (this.scrolled && this.#vertical) offset = -offset
-        if ((reason === 'snap' || smooth) && this.hasAttribute('animated')) return animate(
-            element[scrollProp], offset, 300, easeOutQuad,
-            x => element[scrollProp] = x,
-        ).then(() => {
-            this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
-            this.#afterScroll(reason)
-        })
-        else {
+        if ((reason === 'snap' || smooth) && this.hasAttribute('animated')) {
+            // fleur-epub patch: 点按/程序翻页（reason 'page'）用 ease-in-out + 400ms，
+            // 观感更顺滑；手势松手 snap 保持 ease-out 300ms（贴合手指初速度更自然）
+            const isPageTurn = reason === 'page'
+            return animate(
+                element[scrollProp], offset, isPageTurn ? 400 : 300,
+                isPageTurn ? easeInOutCubic : easeOutQuad,
+                x => element[scrollProp] = x,
+            ).then(() => {
+                this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+                this.#afterScroll(reason)
+            })
+        } else {
             element[scrollProp] = offset
             this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
             this.#afterScroll(reason)

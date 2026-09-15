@@ -143,12 +143,37 @@
 	font-family: var(--font-interface);
 }
 
+/* 页脚角标（微信读书式）：左下阅读进度 / 右下章节页码，随阅读主题联动 */
+.fleur-epub-pagebadges {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: calc(6px + var(--fleur-epub-safe-bottom, 0px));
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 0 14px;
+	pointer-events: none;
+	z-index: 30;
+}
+
 .fleur-epub-percent {
 	color: var(--fleur-epub-text-muted);
-	font-size: 12px;
+	font-size: 11.5px;
 	font-variant-numeric: tabular-nums;
-	min-width: 38px;
-	text-align: right;
+	opacity: 0.85;
+}
+
+.fleur-epub-pagenum {
+	color: var(--fleur-epub-text-muted);
+	font-size: 11.5px;
+	font-variant-numeric: tabular-nums;
+	opacity: 0.85;
+}
+
+/* 滚动模式：章节页码无意义，隐藏（data-flow 由 applyFlow 维护） */
+.fleur-epub-root[data-flow='scrolled'] .fleur-epub-pagenum {
+	display: none;
 }
 
 /* 阅读区 */
@@ -713,7 +738,7 @@
 
 /* ── 移动端点按标注：轻量批注卡（内容 + 编辑/删除图标工具栏） ──
    复用 annview 气泡骨架，重新设计呼吸感：更大内边距、更松行距、圆角与柔和投影；
-   纯高亮（无批注文字）时内容区显示高亮原文弱化样式。 */
+   纯高亮/划线（无批注文字）→ 只给「清除」动作行（图标 + 文字），不展示原文。 */
 .fleur-epub-annquick {
 	min-width: 200px;
 	max-width: 320px;
@@ -723,9 +748,22 @@
 	border-radius: 12px;
 	box-shadow: 0 10px 32px rgba(0, 0, 0, 0.16);
 }
-.fleur-epub-annview.fleur-epub-annquick.is-quote {
-	margin-top: 2px;
+/* 纯高亮/划线的清除动作卡：单行宽按钮（橡皮擦图标 + 动作名） */
+.fleur-epub-annview-clear {
+	display: flex;
+	justify-content: center;
+	margin: 2px -6px 0;
+}
+.fleur-epub-annquick-btn.is-wide {
+	gap: 7px;
+	width: auto;
+	padding: 0 14px;
+	height: 36px;
 	color: var(--text-muted);
+	font-size: 13.5px;
+}
+.fleur-epub-annquick-clearlabel {
+	white-space: nowrap;
 }
 .fleur-epub-annquick-bar {
 	display: flex;
@@ -1540,9 +1578,13 @@ body.fleur-epub-mobile .fleur-epub-mode-btn {
 	font-size: 12px;
 	padding: 6px 12px;
 }
-body.fleur-epub-mobile .fleur-epub-percent {
-	font-size: 12.5px;
-	min-width: 42px;
+body.fleur-epub-mobile .fleur-epub-pagebadges {
+	padding: 0 16px;
+	bottom: calc(8px + var(--fleur-epub-safe-bottom, 0px));
+}
+body.fleur-epub-mobile .fleur-epub-percent,
+body.fleur-epub-mobile .fleur-epub-pagenum {
+	font-size: 12px;
 }
 
 /* Aa 外观面板：窄屏（<360px 视口）不溢出 */

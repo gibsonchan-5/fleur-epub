@@ -68,9 +68,9 @@ export const READER_THEMES: Record<ReaderTheme, {
 	},
 };
 
-/** 预置字体（macOS 系统自带为主，值为完整 CSS font-family 栈；'' = 默认宋体栈） */
+/** 预置字体（macOS 系统自带为主，值为完整 CSS font-family 栈；'' = 跟随 Obsidian 全局文本字体） */
 const PRESET_FONTS: Array<{ label: string; stack: string }> = [
-	{ label: '默认 · 宋体', stack: '' },
+	{ label: '默认 · 跟随 Obsidian', stack: '' },
 	{ label: '宋体 — Songti SC', stack: '"Songti SC", "STSong", "SimSun", serif' },
 	{ label: '苹方 — PingFang SC', stack: '"PingFang SC", "Helvetica Neue", sans-serif' },
 	{ label: '楷体 — Kaiti SC', stack: '"Kaiti SC", "STKaiti", "KaiTi", serif' },
@@ -162,6 +162,8 @@ export class EpubReaderView extends FileView {
 	/** 标注重挂就绪轮询计时（foliate load 事件早于 overlayer 创建，需延迟挂载） */
 	private annMountTimer: number | null = null;
 	private percentEl!: HTMLElement;
+	/** 页脚角标：右下章节页码（翻页模式；滚动模式隐藏） */
+	private pageEl!: HTMLElement;
 	private titleEl!: HTMLElement;
 	private readerEl!: HTMLElement;
 	private modeBtnScroll!: HTMLElement;
@@ -179,6 +181,10 @@ export class EpubReaderView extends FileView {
 	private annPopup: HTMLElement | null = null;
 	/** 批注卡片的全局关闭监听清理函数（外点 / Esc） */
 	private annPopupClose: (() => void) | null = null;
+	/** 批注弹窗最近一次弹出时间：relocate 宽限期判定用（键盘弹出/字体加载的浮动重排不得闪掉弹窗） */
+	private annPopupShownAt = 0;
+	/** 上一次 relocate 的全书比例：判定位置是否真的变化（snap 校正等未变时不得关浮层） */
+	private lastRelocateFrac: number | null = null;
 	private currentSelDoc: Document | null = null;
 	private selSnapshot = '';
 	// ── 段落对照翻译 ──
@@ -314,13 +320,19 @@ export class EpubReaderView extends FileView {
 		}
 
 		right.appendChild(seg);
-		right.appendChild(this.percentEl);
 		bar.appendChild(this.titleEl);
 		bar.appendChild(right);
 
 		this.readerEl = createDiv('fleur-epub-reader');
 		this.contentEl.appendChild(bar);
 		this.contentEl.appendChild(this.readerEl);
+
+		// 页脚角标（微信读书式）：左下阅读进度百分比、右下章节页码（仅翻页模式显示）
+		const badges = createDiv('fleur-epub-pagebadges');
+		badges.appendChild(this.percentEl);
+		this.pageEl = createSpan('fleur-epub-pagenum');
+		badges.appendChild(this.pageEl);
+		this.readerEl.appendChild(badges);
 
 		// 宿主侧键盘翻页（焦点在宿主时生效；iframe 内的由 bindDocEvents 覆盖）
 		this.contentEl.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -335,6 +347,13 @@ export class EpubReaderView extends FileView {
 			'wheel',
 			(e: WheelEvent) => this.onReaderWheel(e),
 			{ passive: false },
+		);
+
+		// Obsidian 全局字体 / 主题变化 → 重新注入排版（默认字体跟随 --font-text，需重取值）
+		this.registerEvent(
+			this.app.workspace.on('css-change', () => {
+				if (this.foliateView) this.applyReaderStyles();
+			}),
 		);
 
 		// 移动端：创建底部工具栏并让 chrome 初始隐藏（沉浸开局，中央点按呼出）。
@@ -398,6 +417,13 @@ export class EpubReaderView extends FileView {
 				const d = e.detail ?? {};
 				const percent = typeof d.fraction === 'number' ? Math.round(d.fraction * 100) : undefined;
 				if (percent !== undefined) this.percentEl.setText(`${percent}%`);
+				// 章节页码（右下角标）：foliate 的 pages 含首尾 2 个空列，实际页数 = pages - 2
+				const r = view.renderer;
+				if (r && typeof r.page === 'number' && typeof r.pages === 'number' && r.pages > 2) {
+					this.pageEl.setText(`${r.page}/${r.pages - 2}`);
+				} else {
+					this.pageEl.setText('');
+				}
 				this.scheduleSaveProgress(d.cfi, percent);
 			});
 
@@ -438,7 +464,8 @@ export class EpubReaderView extends FileView {
 			});
 
 			// 点击 / 侧边栏定位标注 → 批注卡片（优先用标注 range 定位，避免依赖陈旧鼠标坐标）
-			// 仅展示有批注内容的标注：纯高亮/划线点击不弹窗（微信读书式，换色与删除走侧边栏）
+			// 桌面端仅展示有批注内容的标注：纯高亮/划线点击不弹窗（清除走右键菜单与侧边栏）；
+			// 移动端纯高亮/划线点按 → 清除动作卡（见 showAnnotationActionSheet）
 			view.addEventListener('show-annotation', (e: CustomEvent) => {
 				const { value, range } = e.detail ?? {};
 				const ann = this.bookData?.annotations.find((x) => x.cfi === value);
@@ -454,8 +481,16 @@ export class EpubReaderView extends FileView {
 			});
 
 			// 翻页 / 滚动时收起全部浮层，并按新视口重排翻译优先级（节流）
-			view.addEventListener('relocate', () => {
-				this.hideAnnPopup();
+			view.addEventListener('relocate', (e: CustomEvent) => {
+				// 位置未变的 relocate 不得关闭浮层：移动端每次 touchend 都会触发 snap 校正，
+				// 即便无位移也会派发 relocate——点按标注/按钮刚弹出的浮层会在同帧被关掉（表现为闪退）
+				const frac = typeof e.detail?.fraction === 'number' ? e.detail.fraction : null;
+				const moved = frac === null || this.lastRelocateFrac === null
+					|| Math.abs(frac - this.lastRelocateFrac) > 1e-9;
+				this.lastRelocateFrac = frac;
+				if (!moved) return;
+				// 宽限期：批注弹窗刚弹出（<600ms）后的浮动重排（键盘弹出/字体加载 expand）不闪掉弹窗
+				if (!this.annPopup || Date.now() - this.annPopupShownAt >= 600) this.hideAnnPopup();
 				// 选区仍活动 → 保留选段工具条：选段本身可能触发布局微调型 relocate；
 				// 真翻页时选区塌缩，下轮 selectionchange 自然收起
 				const sel = this.currentSelDoc?.getSelection();
@@ -672,6 +707,8 @@ export class EpubReaderView extends FileView {
 			else renderer.removeAttribute('animated');
 			this.applyColumnLayout();
 		}
+		// 页脚角标联动：滚动模式隐藏章节页码（CSS 作用域）
+		this.contentEl.setAttribute('data-flow', flow);
 		this.modeBtnScroll.toggleClass('is-active', flow === 'scrolled');
 		this.modeBtnPage.toggleClass('is-active', flow === 'paginated');
 	}
@@ -821,6 +858,19 @@ export class EpubReaderView extends FileView {
 		this.applyReaderStyles();
 	}
 
+	/**
+	 * 默认正文字体：跟随 Obsidian 全局文本字体（body 上的 --font-text）。
+	 * 章节文档是独立 iframe，拿不到宿主 CSS 变量，故在宿主侧取值后写入注入样式。
+	 * 取不到时回退中文宋体栈。
+	 */
+	private resolveDefaultFont(): string {
+		const cs = getComputedStyle(document.body);
+		const read = (name: string) => cs.getPropertyValue(name).replace(/\s+/g, ' ').trim();
+		const stack = read('--font-text') || read('--font-default');
+		if (stack && !stack.startsWith('var(')) return stack;
+		return '"Songti SC", "STSong", "SimSun", "Noto Serif CJK SC", Georgia, "Times New Roman", serif';
+	}
+
 	/** 排版样式：注入章节文档（foliate 在每次章节加载后自动重注入 setStyles） */
 	applyReaderStyles(): void {
 		// 宿主侧顶栏 / 阅读区底色随主题联动
@@ -844,7 +894,7 @@ export class EpubReaderView extends FileView {
 		const fontSize = s.fontSize;
 		const t = READER_THEMES[s.theme] ?? READER_THEMES.light;
 		const dark = s.theme === 'dark';
-		const bodyFont = s.fontFamily || '"Songti SC", "STSong", "SimSun", "Noto Serif CJK SC", Georgia, "Times New Roman", serif';
+		const bodyFont = s.fontFamily || this.resolveDefaultFont();
 		// 合成字重：多数中文字体（含大量 EPUB 内嵌字体）只提供「常规 / 粗」两个字面，
 		// 单靠 font-weight 时 300 与 500 都回退到 400，档位看不出差别。
 		// 这里叠加 -webkit-text-stroke 做笔画增减：细档用背景色侵蚀笔画变细，
@@ -1737,8 +1787,9 @@ export class EpubReaderView extends FileView {
 	}
 
 	/**
-	 * 移动端点按标注 → 轻量批注卡：批注内容直接可见，下方小工具栏（编辑 / 删除）。
-	 * 删除 = 清除高亮与批注（合并原 action sheet 的「清除」语义，替代Obsidian Menu 弹窗）。
+	 * 移动端点按标注 → 轻量批注卡：
+	 * 有批注 → 批注内容直接可见，下方小工具栏（编辑 / 删除图标）；
+	 * 纯高亮/划线（无批注）→ 只给「清除高亮/直线/波浪线」动作，不展示原文。
 	 */
 	private showAnnotationActionSheet(ann: EpubAnnotation, host: { x: number; y: number }): void {
 		this.hideSelectionToolbar();
@@ -1746,27 +1797,41 @@ export class EpubReaderView extends FileView {
 		const pop = document.body.createDiv('fleur-epub-annview fleur-epub-annquick');
 		this.annPopup = pop;
 
-		// 内容区：有批注显示批注文字（120 字截断 + 展开切换）；纯高亮/划线显示高亮原文
+		// 纯高亮 / 划线（无批注内容）：点按不给「批注内容」，直接给清除动作（微信读书式）。
+		// 把高亮原文当批注内容展示是错误的语义——高亮不是批注。
 		const comment = cleanAnnotationText(ann.comment ?? '');
+		if (!comment) {
+			const clearLabel = this.describeAnnotation(ann);
+			const row = pop.createDiv('fleur-epub-annview-clear');
+			const btn = row.createDiv('fleur-epub-annquick-btn is-wide');
+			btn.setAttribute('aria-label', clearLabel);
+			setIcon(btn.createSpan('fleur-epub-annquick-icon'), 'eraser');
+			btn.createSpan('fleur-epub-annquick-clearlabel').setText(clearLabel);
+			btn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				this.hideAnnPopup();
+				void this.deleteAnnotation(ann);
+			});
+			this.mountAnnPopupClose(pop);
+			this.placeAnnPopup(pop, host.x, host.y);
+			return;
+		}
+
+		// 内容区：批注文字（120 字截断 + 展开切换）
 		const MAX_CHARS = 120;
 		const isLong = comment.length > MAX_CHARS;
 		let expanded = false;
 		const content = pop.createDiv('fleur-epub-annview-text');
-		if (comment) {
-			content.setText(isLong ? comment.slice(0, MAX_CHARS) + '...' : comment);
-			if (isLong) {
-				const hint = pop.createDiv('fleur-epub-annview-toggle');
-				hint.setText('展开全文 ›');
-				hint.addEventListener('click', (e) => {
-					e.stopPropagation();
-					expanded = !expanded;
-					content.setText(expanded ? comment : comment.slice(0, MAX_CHARS) + '...');
-					hint.setText(expanded ? '收起 ▲' : '展开全文 ›');
-				});
-			}
-		} else {
-			content.addClass('is-quote');
-			content.setText(ann.text || '高亮');
+		content.setText(isLong ? comment.slice(0, MAX_CHARS) + '...' : comment);
+		if (isLong) {
+			const hint = pop.createDiv('fleur-epub-annview-toggle');
+			hint.setText('展开全文 ›');
+			hint.addEventListener('click', (e) => {
+				e.stopPropagation();
+				expanded = !expanded;
+				content.setText(expanded ? comment : comment.slice(0, MAX_CHARS) + '...');
+				hint.setText(expanded ? '收起 ▲' : '展开全文 ›');
+			});
 		}
 
 		// 小工具栏：纯图标按钮（编辑 / 删除），不带文字
@@ -1980,6 +2045,8 @@ export class EpubReaderView extends FileView {
 
 	/** 全局关闭：点击卡片外部或按 Esc（同一时刻只显示一个弹窗） */
 	private mountAnnPopupClose(pop: HTMLElement): void {
+		// 记录弹出时间：relocate 监听在宽限期内不闪掉刚弹出的弹窗
+		this.annPopupShownAt = Date.now();
 		const outside = (e: MouseEvent) => {
 			if (!pop.contains(e.target as Node)) this.hideAnnPopup();
 		};
