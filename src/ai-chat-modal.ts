@@ -61,41 +61,6 @@ function createStopIcon(container: Node): void {
   createSvgEl(svg, 'rect', { x: '6', y: '6', width: '12', height: '12', rx: '1' });
 }
 
-/** 创建复制图标 SVG */
-function createCopyIcon(container: Node): void {
-  const svg = createSvgEl(container, 'svg', {
-    width: '14', height: '14', viewBox: '0 0 24 24',
-    fill: 'none', stroke: 'currentColor',
-    'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round'
-  });
-  createSvgEl(svg, 'rect', { x: '9', y: '9', width: '13', height: '13', rx: '2', ry: '2' });
-  createSvgEl(svg, 'path', { d: 'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1' });
-}
-
-/** 创建重新生成图标 SVG */
-function createRegenIcon(container: Node): void {
-  const svg = createSvgEl(container, 'svg', {
-    width: '14', height: '14', viewBox: '0 0 24 24',
-    fill: 'none', stroke: 'currentColor',
-    'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round'
-  });
-  createSvgEl(svg, 'polyline', { points: '23 4 23 10 17 10' });
-  createSvgEl(svg, 'polyline', { points: '1 20 1 14 7 14' });
-  createSvgEl(svg, 'path', { d: 'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15' });
-}
-
-/** 创建保存笔记图标 SVG */
-function createSaveIcon(container: Node): void {
-  const svg = createSvgEl(container, 'svg', {
-    width: '14', height: '14', viewBox: '0 0 24 24',
-    fill: 'none', stroke: 'currentColor',
-    'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round'
-  });
-  createSvgEl(svg, 'path', { d: 'M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z' });
-  createSvgEl(svg, 'polyline', { points: '17 21 17 13 7 13 7 21' });
-  createSvgEl(svg, 'polyline', { points: '7 3 7 8 15 8' });
-}
-
 /** 安全地将 HTML 字符串渲染到元素中（用 DOMParser 替代 innerHTML） */
 function safeSetHTML(el: HTMLElement, html: string): void {
   const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -153,7 +118,9 @@ export class AIChatPanel {
   constructor(
     private plugin: FleurEpubPlugin,
     private selectedText: string,
-    private mode: 'explain' | 'translate' | 'ask' = 'explain'
+    private mode: 'explain' | 'translate' | 'ask' = 'explain',
+    /** 选段解释模式下由 reader-view 注入：把 AI 回答写为当前选段上的批注 */
+    private onSaveAnnotation?: (comment: string) => Promise<boolean>
   ) {}
 
   open(anchorX?: number, anchorY?: number) {
@@ -545,31 +512,41 @@ export class AIChatPanel {
 
   private buildActions(container: HTMLElement) {
     container.addClass('fleur-ai-actions');
+    container.empty();
+
+    // 微信读书式文字胶囊：图标按钮（14px 无文字）在部分主题/移动端几乎不可见，
+    // 改为带文字的 chip，桌面与平板都一眼可辨
+    const mk = (label: string, title: string, fn: () => void) => {
+      const b = container.createEl('button', 'fleur-ai-action-chip');
+      b.setText(label);
+      b.title = title;
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        fn();
+      });
+      return b;
+    };
+
+    // 重新生成
+    mk('重新生成', '重新生成本回答', () => { void this.regenerate(); });
 
     // 复制
-    const copyBtn = container.createEl('button');
-    copyBtn.addClass('fleur-ai-action-btn');
-    copyBtn.title = '复制回答';
-    createCopyIcon(copyBtn);
-    copyBtn.addEventListener('click', () => {
+    mk('复制', '复制回答', () => {
       void navigator.clipboard.writeText(this.rawMarkdown)
         .then(() => new Notice('已复制'))
         .catch(() => new Notice('复制失败'));
     });
 
-    // 重新生成
-    const regenBtn = container.createEl('button');
-    regenBtn.addClass('fleur-ai-action-btn');
-    regenBtn.title = '重新生成';
-    createRegenIcon(regenBtn);
-    regenBtn.addEventListener('click', () => { void this.regenerate(); });
+    // 写入批注：仅选段解释模式（注入了回调）时展示
+    if (this.onSaveAnnotation) {
+      mk('写入批注', '将本回答写为当前选段的批注', () => {
+        if (!this.rawMarkdown) { new Notice('还没有可写入的内容'); return; }
+        void this.onSaveAnnotation!(this.rawMarkdown);
+      });
+    }
 
-    // 保存笔记
-    const saveBtn = container.createEl('button');
-    saveBtn.addClass('fleur-ai-action-btn');
-    saveBtn.title = '保存笔记';
-    createSaveIcon(saveBtn);
-    saveBtn.addEventListener('click', () => { void this.saveNote(); });
+    // 保存笔记（原有能力，保留）
+    mk('保存笔记', '保存为 Obsidian 笔记', () => { void this.saveNote(); });
   }
 
   /** 重新生成最后一轮 AI 回答 */

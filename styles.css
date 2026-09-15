@@ -841,6 +841,18 @@
 	width: 18px;
 	height: 18px;
 }
+/* 移动端触控加大：图标 20px、按钮 38px 高（对标微信读书手指点按目标） */
+body.fleur-epub-mobile .fleur-epub-annquick-btn {
+	width: 46px;
+	height: 38px;
+}
+body.fleur-epub-mobile .fleur-epub-annquick-btn.is-wide {
+	height: 38px;
+}
+body.fleur-epub-mobile .fleur-epub-annquick-icon svg {
+	width: 20px;
+	height: 20px;
+}
 
 .fleur-ai-panel {
   position: fixed;
@@ -1028,6 +1040,26 @@
 .fleur-ai-action-btn:hover {
   background: var(--background-modifier-hover);
   color: var(--interactive-accent);
+}
+
+/* 操作胶囊：图标按钮（14px 无文字）在部分主题/移动端几乎不可见，改为文字 chip */
+.fleur-ai-action-chip {
+  padding: 3px 12px;
+  border: 1px solid var(--background-modifier-border, rgba(0,0,0,.12));
+  background: transparent;
+  color: var(--text-muted, #7a7671);
+  font-size: 12.5px;
+  line-height: 1.6;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.fleur-ai-action-chip:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.fleur-ai-action-chip:active {
+  opacity: 0.6;
 }
 
 .fleur-ai-user-bubble {
@@ -1784,7 +1816,7 @@ body.fleur-epub-mobile .fleur-epub-sheet-search-input {
 	/* iOS：字号 < 16px 聚焦会触发系统自动放大 */
 	border-radius: 8px;
 	background: var(--background-secondary);
-	border: 1px solid var(--background-modifier-border);
+	border: 1px solid var(--background-modifier-border, rgba(0,0,0,.12));
 	box-shadow: none;
 }
 body.fleur-epub-mobile .fleur-epub-sheet-hit {
@@ -1916,8 +1948,8 @@ body.fleur-epub-mobile .fleur-epub-mselbar {
 	z-index: 60;
 	display: flex;
 	align-items: center;
-	gap: 5px;
-	padding: 7px 12px;
+	gap: 6px;
+	padding: 8px 12px;
 	max-width: calc(100vw - 16px);
 	background: var(--fleur-epub-bar-bg, var(--background-primary));
 	border: 1px solid var(--fleur-epub-bar-border, var(--background-modifier-border));
@@ -1926,14 +1958,14 @@ body.fleur-epub-mobile .fleur-epub-mselbar {
 	-webkit-tap-highlight-color: transparent;
 }
 body.fleur-epub-mobile .fleur-epub-mselbar .fleur-epub-selbar-dot {
-	width: 22px;
-	height: 22px;
+	width: 24px;
+	height: 24px;
 }
 body.fleur-epub-mobile .fleur-epub-mselbar .fleur-epub-selbar-btn {
-	min-width: 32px;
-	height: 32px;
-	font-size: 14px;
-	padding: 0 9px;
+	min-width: 38px;
+	height: 38px;
+	font-size: 15px;
+	padding: 0 11px;
 }
 body.fleur-epub-mobile .fleur-epub-mselbar .fleur-epub-selbar-btn:active {
 	background: var(--fleur-epub-btn-hover, var(--background-modifier-hover));
@@ -2026,6 +2058,49 @@ body .fleur-ai-panel .fleur-ai-send-btn {
 	color: var(--text-normal);
 	box-shadow: none;
 	border: none;
+}
+/* 胶囊按钮同样做主题免疫：button 全局规则可能覆盖底色/文字色 */
+body .fleur-ai-panel .fleur-ai-action-chip {
+	background: transparent;
+	color: var(--text-muted);
+	border: 1px solid var(--background-modifier-border, rgba(0,0,0,.12));
+	box-shadow: none;
+}
+
+/* 移动端触控加大：工具图标 +2~4px、按钮热区同步放大（对标微信读书） */
+body.fleur-epub-mobile .fleur-ai-action-btn {
+	width: 34px;
+	height: 34px;
+}
+body.fleur-epub-mobile .fleur-ai-close-btn {
+	width: 30px;
+	height: 30px;
+}
+body.fleur-epub-mobile .fleur-ai-expand-btn {
+	width: 32px;
+	height: 32px;
+}
+body.fleur-epub-mobile .fleur-ai-expand-btn svg {
+	width: 20px;
+	height: 20px;
+}
+body.fleur-epub-mobile .fleur-ai-send-btn {
+	width: 40px;
+	height: 40px;
+}
+body.fleur-epub-mobile .fleur-ai-send-btn svg,
+body.fleur-epub-mobile .fleur-ai-action-btn svg {
+	width: 20px;
+	height: 20px;
+}
+/* 移动端胶囊：触控目标加大（微信读书式文字按钮） */
+body.fleur-epub-mobile .fleur-ai-action-chip {
+	padding: 6px 16px;
+	font-size: 14px;
+	min-height: 34px;
+}
+body.fleur-epub-mobile .fleur-ai-actions {
+	gap: 8px;
 }
 
 /* ── M4 面板移动化：Aa 外观面板 bottom sheet 形态 ── */

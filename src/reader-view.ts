@@ -41,6 +41,10 @@ export const HIGHLIGHT_COLORS: Record<string, string> = {
 	purple: '#ab8de8',
 };
 
+/** 选区工具条展示的高亮三色（微信读书式）；pink/purple 不再作为新标注入口，
+ *  仅保留在 HIGHLIGHT_COLORS 中供旧数据渲染兜底与划线/波浪线用色 */
+export const HIGHLIGHT_COLOR_KEYS = ['yellow', 'green', 'blue'] as const;
+
 /** 阅读主题色板：章节文档（setStyles 注入）与宿主侧（CSS 变量）共用同一套值 */
 export const READER_THEMES: Record<ReaderTheme, {
 	label: string; bg: string; text: string; muted: string; border: string;
@@ -183,6 +187,8 @@ export class EpubReaderView extends FileView {
 	private annPopupClose: (() => void) | null = null;
 	/** 批注弹窗最近一次弹出时间：relocate 宽限期判定用（键盘弹出/字体加载的浮动重排不得闪掉弹窗） */
 	private annPopupShownAt = 0;
+	/** 打开 AI 面板时捕获的选区锚点（供「写入批注」延迟落点，选区塌缩后仍可写入） */
+	private aiAnnotSeed: { cfi: string; text: string } | null = null;
 	/** 上一次 relocate 的全书比例：判定位置是否真的变化（snap 校正等未变时不得关浮层） */
 	private lastRelocateFrac: number | null = null;
 	private currentSelDoc: Document | null = null;
@@ -498,7 +504,11 @@ export class EpubReaderView extends FileView {
 				this.lastRelocateFrac = frac;
 				if (!moved) return;
 				// 宽限期：批注弹窗刚弹出（<600ms）后的浮动重排（键盘弹出/字体加载 expand）不闪掉弹窗
-				if (!this.annPopup || Date.now() - this.annPopupShownAt >= 600) this.hideAnnPopup();
+				// 编辑弹窗（含 textarea）永不因 relocate 自动关闭：平板上编辑时软键盘弹出 →
+				// 视口 resize → 重排 relocate，若此刻拆掉编辑窗，表现为「编辑时闪退」。
+				// 编辑窗只通过 ✕ / 取消 / 保存 / 点击外部 关闭。
+				const isEditor = !!this.annPopup?.querySelector('textarea');
+				if (!isEditor && (!this.annPopup || Date.now() - this.annPopupShownAt >= 600)) this.hideAnnPopup();
 				// 选区仍活动 → 保留选段工具条：选段本身可能触发布局微调型 relocate；
 				// 真翻页时选区塌缩，下轮 selectionchange 自然收起
 				const sel = this.currentSelDoc?.getSelection();
@@ -1329,6 +1339,15 @@ export class EpubReaderView extends FileView {
 
 	/** 在当前选段上创建标注（选段 doc 由工具条记录，避免弹层期间选区漂移） */
 	private async createAnnotation(kind: AnnotationKind, color: string): Promise<EpubAnnotation | null> {
+		const seed = this.captureSelectionAnchor();
+		if (!seed) return null;
+		const ann = await this.createAnnotationAt(seed.cfi, seed.text, kind, color);
+		new Notice(kind === 'highlight' ? '已高亮' : kind === 'wavy' ? '已加波浪线' : '已划线', 1600);
+		return ann;
+	}
+
+	/** 捕获当前选区的 CFI 锚点（打开 AI 面板前快照，供「写入批注」延迟落点） */
+	private captureSelectionAnchor(): { cfi: string; text: string } | null {
 		const doc = this.currentSelDoc;
 		const sel = doc?.getSelection();
 		if (!doc || !sel || sel.isCollapsed || sel.rangeCount === 0) return null;
@@ -1336,14 +1355,18 @@ export class EpubReaderView extends FileView {
 		const text = sel.toString();
 		const entry = (this.foliateView?.renderer?.getContents?.() ?? []).find((c: any) => c.doc === doc);
 		if (!entry) return null;
-		let cfi: string;
 		try {
-			cfi = this.foliateView.getCFI(entry.index, range);
+			return { cfi: this.foliateView.getCFI(entry.index, range), text };
 		} catch (err) {
 			console.warn('[FleurEPUB] 生成 CFI 失败', err);
 			new Notice('标注创建失败', 3000);
 			return null;
 		}
+	}
+
+	/** 在既有 CFI 锚点上创建标注（AI「写入批注」复用：选区可能在点击时已塌缩） */
+	private async createAnnotationAt(cfi: string, text: string, kind: AnnotationKind, color: string,
+		comment?: string): Promise<EpubAnnotation> {
 		const ann: EpubAnnotation = {
 			id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
 			cfi,
@@ -1352,6 +1375,7 @@ export class EpubReaderView extends FileView {
 			color,
 			createdAt: Date.now(),
 		};
+		if (comment) ann.comment = comment;
 		this.bookData?.annotations.push(ann);
 		try {
 			// 绘制并取章节标题（addAnnotation 返回 { index, label }）
@@ -1362,8 +1386,19 @@ export class EpubReaderView extends FileView {
 		}
 		this.saveBookData();
 		this.plugin.notifyAnnotationsChanged();
-		new Notice(kind === 'highlight' ? '已高亮' : kind === 'wavy' ? '已加波浪线' : '已划线', 1600);
 		return ann;
+	}
+
+	/** AI 面板「写入批注」：把 AI 回答写为打开面板时捕获选段上的高亮批注 */
+	private async saveAIAnnotation(comment: string): Promise<boolean> {
+		const seed = this.aiAnnotSeed;
+		if (!seed) {
+			new Notice('写入失败：选区已失效，请重新选段', 2500);
+			return false;
+		}
+		await this.createAnnotationAt(seed.cfi, seed.text, 'highlight', 'yellow', comment);
+		new Notice('已写入批注', 1800);
+		return true;
 	}
 
 	private async deleteAnnotation(ann: EpubAnnotation): Promise<void> {
@@ -1417,8 +1452,9 @@ export class EpubReaderView extends FileView {
 
 		const press = (el: HTMLElement) => el.addEventListener('mousedown', (e) => e.preventDefault());
 
-		// 高亮五色
-		for (const [key, color] of Object.entries(HIGHLIGHT_COLORS)) {
+		// 高亮三色（微信读书式；pink/purple 仅为旧数据兜底，不作为新标注入口）
+		for (const key of HIGHLIGHT_COLOR_KEYS) {
+			const color = HIGHLIGHT_COLORS[key];
 			const dot = bar.createSpan('fleur-epub-selbar-dot');
 			dot.setCssStyles({ background: color });
 			dot.setAttribute('aria-label', '高亮');
@@ -1457,7 +1493,9 @@ export class EpubReaderView extends FileView {
 			});
 		}
 		mkBtn('AI', 'AI 解释', () => {
-			new AIChatPanel(this.plugin, this.selSnapshot, 'explain').open(host.x, host.y);
+			// 打开面板前快照选区锚点：等用户点「写入批注」时选区多半已塌缩
+			this.aiAnnotSeed = this.captureSelectionAnchor();
+			new AIChatPanel(this.plugin, this.selSnapshot, 'explain', (comment) => this.saveAIAnnotation(comment)).open(host.x, host.y);
 		});
 		mkBtn('译', '翻译本段（原文下方嵌入译文）', () => {
 			this.translateSelectionParagraph(doc);
