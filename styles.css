@@ -2023,6 +2023,11 @@ body.fleur-epub-mobile .fleur-epub-mselbar {
 	gap: 6px;
 	padding: 8px 12px;
 	max-width: calc(100vw - 16px);
+	/* 窄屏放不下时横向滑动，而不是把色点/按钮压扁（手机竖屏会出现） */
+	overflow-x: auto;
+	overflow-y: hidden;
+	scrollbar-width: none;
+	-webkit-overflow-scrolling: touch;
 	background: var(--fleur-epub-bar-bg, var(--background-primary));
 	border: 1px solid var(--fleur-epub-bar-border, var(--background-modifier-border));
 	border-radius: 999px;
@@ -2032,12 +2037,15 @@ body.fleur-epub-mobile .fleur-epub-mselbar {
 body.fleur-epub-mobile .fleur-epub-mselbar .fleur-epub-selbar-dot {
 	width: 24px;
 	height: 24px;
+	/* 不参与收缩：窄屏上项目多时色点会被 flex 挤成 0 宽（直接看不见），必须锁死 */
+	flex: 0 0 auto;
 }
 body.fleur-epub-mobile .fleur-epub-mselbar .fleur-epub-selbar-btn {
 	min-width: 38px;
 	height: 38px;
 	font-size: 15px;
 	padding: 0 11px;
+	flex: 0 0 auto;
 }
 body.fleur-epub-mobile .fleur-epub-mselbar .fleur-epub-selbar-btn:active {
 	background: var(--fleur-epub-btn-hover, var(--background-modifier-hover));

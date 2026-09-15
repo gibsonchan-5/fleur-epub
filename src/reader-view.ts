@@ -43,11 +43,15 @@ export const HIGHLIGHT_COLORS: Record<string, string> = {
 	blue: '#64a6e8',
 	pink: '#ef8a8a',
 	purple: '#ab8de8',
+	/** 移动端三色里的「红」（朱红，与暖黄/豆绿同饱和度区间，压在纸面上不刺眼） */
+	red: '#dd6a58',
 };
 
-/** 选区工具条展示的高亮三色（微信读书式）；pink/purple 不再作为新标注入口，
- *  仅保留在 HIGHLIGHT_COLORS 中供旧数据渲染兜底与划线/波浪线用色 */
-export const HIGHLIGHT_COLOR_KEYS = ['yellow', 'green', 'blue'] as const;
+/** 桌面端选区工具条：原五色（黄 · 绿 · 蓝 · 粉 · 紫），鼠标点选精度高，色多无妨 */
+export const HIGHLIGHT_COLOR_KEYS = ['yellow', 'green', 'blue', 'pink', 'purple'] as const;
+
+/** 移动端选区工具条：黄 · 红 · 绿 三色（触屏上色块越多越难选准，对齐微信读书的做法） */
+export const MOBILE_HIGHLIGHT_COLOR_KEYS = ['yellow', 'red', 'green'] as const;
 
 /** 阅读主题色板：章节文档（setStyles 注入）与宿主侧（CSS 变量）共用同一套值 */
 export const READER_THEMES: Record<ReaderTheme, {
@@ -1509,12 +1513,14 @@ export class EpubReaderView extends FileView {
 
 		const press = (el: HTMLElement) => el.addEventListener('mousedown', (e) => e.preventDefault());
 
-		// 高亮三色（微信读书式；pink/purple 仅为旧数据兜底，不作为新标注入口）
-		for (const key of HIGHLIGHT_COLOR_KEYS) {
+		// 高亮色点：桌面五色（黄绿蓝粉紫）/ 移动端三色（黄红绿）。
+		// 旧数据里的 pink/purple/blue 仍按 HIGHLIGHT_COLORS 正常渲染，只是不再作为新入口。
+		const colorKeys = mobile ? MOBILE_HIGHLIGHT_COLOR_KEYS : HIGHLIGHT_COLOR_KEYS;
+		for (const key of colorKeys) {
 			const color = HIGHLIGHT_COLORS[key];
 			const dot = bar.createSpan('fleur-epub-selbar-dot');
 			dot.setCssStyles({ background: color });
-			dot.setAttribute('aria-label', '高亮');
+			dot.setAttribute('aria-label', `高亮·${key}`);
 			press(dot);
 			dot.addEventListener('click', () => {
 				void this.createAnnotation('highlight', key);
