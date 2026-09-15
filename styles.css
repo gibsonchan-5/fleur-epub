@@ -2020,10 +2020,11 @@ body.fleur-epub-mobile .fleur-epub-mselbar {
 	z-index: 60;
 	display: flex;
 	align-items: center;
-	gap: 6px;
-	padding: 8px 12px;
+	gap: 4px;
+	padding: 7px 9px;
 	max-width: calc(100vw - 16px);
-	/* 窄屏放不下时横向滑动，而不是把色点/按钮压扁（手机竖屏会出现） */
+	/* 兜底：极端窄屏（或带「擦除」附加项）放不下时横向滑动，
+	   而不是把色点/按钮压扁——色点被 flex 挤成 0 宽会直接看不见 */
 	overflow-x: auto;
 	overflow-y: hidden;
 	scrollbar-width: none;
@@ -2041,10 +2042,17 @@ body.fleur-epub-mobile .fleur-epub-mselbar .fleur-epub-selbar-dot {
 	flex: 0 0 auto;
 }
 body.fleur-epub-mobile .fleur-epub-mselbar .fleur-epub-selbar-btn {
-	min-width: 38px;
+	/* 压缩排布：320–360px 竖屏也要把「U ~ ✎ AI 译」全部放进一行（末尾的译曾被推出滑出区）。
+	   注意 min-width 按 border-box 计：默认 content-box 时 32 会被 padding 撑成 44px。 */
+	box-sizing: border-box;
+	min-width: 34px;
 	height: 38px;
-	font-size: 15px;
-	padding: 0 11px;
+	font-size: 14px;
+	padding: 0 6px;
+	flex: 0 0 auto;
+}
+body.fleur-epub-mobile .fleur-epub-mselbar .fleur-epub-selbar-sep {
+	/* 分隔线同样不参与收缩（默认会被压成 0 宽，分组线消失） */
 	flex: 0 0 auto;
 }
 body.fleur-epub-mobile .fleur-epub-mselbar .fleur-epub-selbar-btn:active {
