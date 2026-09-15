@@ -130,9 +130,12 @@ export class ShelfView extends ItemView {
 		this.registerEvent(this.app.vault.on('delete', refreshShelf));
 		this.registerEvent(this.app.vault.on('rename', refreshShelf));
 
-		// 开书 → 切书内面板（同时解除 manualShelf 固定，回归自动跟随）
+		// 开书 → 切书内面板（同时解除 manualShelf 固定，回归自动跟随）。
+		// 移动端例外：书架常驻——书内功能（目录/批注/检索）已由阅读器底部工具栏承担，
+		// 开书时若把书架翻成 book 面板，退出书回到书架 tab 会多一步「再按一次返回」。
 		this.registerEvent(
 			this.plugin.events.on('fleur-epub:book-opened', () => {
+				if (isMobileUI(this.plugin)) return;
 				this.manualShelf = false;
 				this.mode = 'book';
 				this.renderAll();
@@ -225,12 +228,15 @@ export class ShelfView extends ItemView {
 
 	private renderAll(): void {
 		// 同步 mode 状态：
+		// ⓪ 移动端 → 恒为书架（书内功能走阅读器底部工具栏，书架常驻）
 		// ① 没书在读 → 强制 shelf
 		// ② 用户手动固定 shelf（点过 back） → 保持 shelf
 		// ③ 否则 → 自动跟随（active reader 在则 book）
 		const active = !!this.plugin.getActiveReader();
 		if (!active) this.manualShelf = false;
-		this.mode = this.manualShelf ? 'shelf' : active ? 'book' : 'shelf';
+		this.mode = isMobileUI(this.plugin)
+			? 'shelf'
+			: this.manualShelf ? 'shelf' : active ? 'book' : 'shelf';
 
 		this.backBtn.toggle(this.mode === 'book');
 		this.titleEl.setText(
@@ -368,8 +374,8 @@ export class ShelfView extends ItemView {
 	/** 点击书架条目的统一入口：正在读的书直接回书内面板，其余交给 openEpub */
 	private openShelfItem(file: TFile): void {
 		const reader = this.plugin.getActiveReader();
-		if (reader?.getLoadedFilePath() === file.path) {
-			// 正在读的书：显示阅读器 leaf 并切回书内面板（目录 / 批注 / 检索）
+		if (!isMobileUI(this.plugin) && reader?.getLoadedFilePath() === file.path) {
+			// 正在读的书（桌面）：显示阅读器 leaf 并切回书内面板（目录 / 批注 / 检索）
 			this.manualShelf = false;
 			this.mode = 'book';
 			this.renderAll();

@@ -861,14 +861,49 @@ export class EpubReaderView extends FileView {
 	/**
 	 * 默认正文字体：跟随 Obsidian 全局文本字体（body 上的 --font-text）。
 	 * 章节文档是独立 iframe，拿不到宿主 CSS 变量，故在宿主侧取值后写入注入样式。
-	 * 取不到时回退中文宋体栈。
+	 * 取值顺序：override 变量（Obsidian 外观设置 / Custom Font Loader 均写这里）
+	 * → --font-text → --font-default → 宋体栈。
 	 */
 	private resolveDefaultFont(): string {
 		const cs = getComputedStyle(document.body);
 		const read = (name: string) => cs.getPropertyValue(name).replace(/\s+/g, ' ').trim();
-		const stack = read('--font-text') || read('--font-default');
+		const stack = read('--font-text-override') || read('--font-text') || read('--font-default');
 		if (stack && !stack.startsWith('var(')) return stack;
 		return '"Songti SC", "STSong", "SimSun", "Noto Serif CJK SC", Georgia, "Times New Roman", serif';
+	}
+
+	/**
+	 * 收集字体栈中字体名对应的宿主 @font-face 规则（含 base64 数据，Custom Font Loader
+	 * 等插件通过它跨平台提供字体）。书籍 iframe 是独立文档，宿主注册的 @font-face 不可见，
+	 * 不注入的话「跟随 Obsidian」只能拿到字体名却没有字体本体，静默回退宋体。
+	 * 同时遍历 document.styleSheets 与 adoptedStyleSheets（新版插件用 constructable sheets）。
+	 */
+	private collectFontFaceCss(fontStack: string): string {
+		const names = new Set<string>();
+		for (const m of fontStack.matchAll(/"([^"]+)"|'([^']+)'|([^,]+)(?=,|$)/g)) {
+			const name = (m[1] ?? m[2] ?? m[3])?.trim().replace(/^["']|["']$/g, '');
+			if (name && !/^(serif|sans-serif|monospace|cursive|fantasy|ui-[\w-]+)$/i.test(name))
+				names.add(name.toLowerCase());
+		}
+		const sheets: Array<CSSStyleSheet> = [];
+		for (let i = 0; i < document.styleSheets.length; i++) sheets.push(document.styleSheets[i]);
+		for (const sheet of (document as Document & { adoptedStyleSheets?: CSSStyleSheet[] }).adoptedStyleSheets ?? [])
+			sheets.push(sheet);
+		const faces: string[] = [];
+		for (const sheet of sheets) {
+			let rules: ArrayLike<CSSRule>;
+			try {
+				rules = sheet.cssRules;
+			} catch {
+				continue; // 跨域样式表不可枚举，跳过
+			}
+			for (const rule of Array.from(rules)) {
+				if (!(rule instanceof CSSFontFaceRule)) continue;
+				const family = rule.style.getPropertyValue('font-family').replace(/["']/g, '').trim().toLowerCase();
+				if (family && names.has(family)) faces.push(rule.cssText);
+			}
+		}
+		return faces.join('\n');
 	}
 
 	/** 排版样式：注入章节文档（foliate 在每次章节加载后自动重注入 setStyles） */
@@ -895,6 +930,8 @@ export class EpubReaderView extends FileView {
 		const t = READER_THEMES[s.theme] ?? READER_THEMES.light;
 		const dark = s.theme === 'dark';
 		const bodyFont = s.fontFamily || this.resolveDefaultFont();
+		// 跟随 Obsidian 时须把宿主 @font-face 一并注入，iframe 内才有字体本体可用
+		const fontFaces = s.fontFamily ? '' : this.collectFontFaceCss(bodyFont);
 		// 合成字重：多数中文字体（含大量 EPUB 内嵌字体）只提供「常规 / 粗」两个字面，
 		// 单靠 font-weight 时 300 与 500 都回退到 400，档位看不出差别。
 		// 这里叠加 -webkit-text-stroke 做笔画增减：细档用背景色侵蚀笔画变细，
@@ -908,6 +945,7 @@ export class EpubReaderView extends FileView {
 					? `-webkit-text-stroke: 0.012em ${t.text};`
 					: '';
 		return `
+			${fontFaces}
 			html { font-size: ${fontSize}px; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; --overlayer-highlight-opacity: .32; --overlayer-highlight-blend-mode: ${dark ? 'screen' : 'multiply'}; }
 			body {
 				font-family: ${bodyFont};

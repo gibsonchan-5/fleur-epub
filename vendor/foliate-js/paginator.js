@@ -211,7 +211,10 @@ const setStylesImportant = (el, styles) => {
 }
 
 class View {
-    #observer = new ResizeObserver(() => this.expand())
+    #observer = new ResizeObserver(() => {
+        // fleur-epub patch: 观察目标随书销毁后不再触发 expand（配合 expand 内的空文档守卫）
+        if (this.document) this.expand()
+    })
     #element = document.createElement('div')
     #iframe = document.createElement('iframe')
     #contentRange = document.createRange()
@@ -407,6 +410,10 @@ class View {
         }
     }
     expand() {
+        // fleur-epub patch: 书关闭（iframe 移除）后 ResizeObserver / fonts.ready 仍可能
+        // 迟到触发，此时 document 为 null，解构 documentElement 直接抛
+        // 「Cannot read properties of null (reading documentElement)」（真机关书时弹 toast）。
+        if (!this.document) return
         const { documentElement } = this.document
         if (this.#column) {
             const side = this.#vertical ? 'height' : 'width'
