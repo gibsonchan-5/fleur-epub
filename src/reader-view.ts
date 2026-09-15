@@ -1418,6 +1418,9 @@ export class EpubReaderView extends FileView {
 	// ── 选择工具条：高亮五色 / 划线 / 波浪线 / 复制 / AI ──
 
 	private showSelectionToolbar(doc: Document, eraseTargets: EpubAnnotation[] = [], mobile = false): void {
+		// 工具条形态一律以运行环境为准：Android 平板长按选段会合成 contextmenu（走下方桌面分支调用），
+		// 不带 mobile 标记会建出桌面工具条（小图标 + 复制按钮），移动端加大样式也不会命中
+		mobile = mobile || isMobileUI(this.plugin);
 		const sel = doc.getSelection();
 		if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
 		const range0 = sel.getRangeAt(0);
@@ -1495,6 +1498,8 @@ export class EpubReaderView extends FileView {
 		mkBtn('AI', 'AI 解释', () => {
 			// 打开面板前快照选区锚点：等用户点「写入批注」时选区多半已塌缩
 			this.aiAnnotSeed = this.captureSelectionAnchor();
+			// 收起原选区：Android 上选区手柄由合成器绘制，会浮在面板之上（表现为面板里残留「划线文本」）
+			try { this.currentSelDoc?.getSelection()?.removeAllRanges(); } catch { /* 忽略 */ }
 			new AIChatPanel(this.plugin, this.selSnapshot, 'explain', (comment) => this.saveAIAnnotation(comment)).open(host.x, host.y);
 		});
 		mkBtn('译', '翻译本段（原文下方嵌入译文）', () => {
