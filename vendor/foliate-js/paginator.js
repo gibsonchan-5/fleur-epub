@@ -279,7 +279,20 @@ class View {
 
                 resolve()
             }, { once: true })
-            this.#iframe.src = src
+            // Obsidian mobile (Capacitor WebView, e.g. MIUI tablets) blocks
+            // iframe navigation to host-created blob: URLs — the load event
+            // never fires and the page stays blank. Fetch the blob text and
+            // inject via srcdoc instead: the srcdoc document inherits the
+            // parent origin (iframe is sandboxed with allow-same-origin), so
+            // the blob: subresource URLs inside still resolve normally.
+            if (src.startsWith('blob:') && document.body?.classList.contains('fleur-epub-mobile')) {
+                fetch(src)
+                    .then(res => res.text())
+                    .then(html => { this.#iframe.srcdoc = html })
+                    .catch(() => { this.#iframe.srcdoc = '' })
+            } else {
+                this.#iframe.src = src
+            }
         })
     }
     render(layout) {
