@@ -2091,17 +2091,23 @@ export class EpubReaderView extends FileView {
 
 	/**
 	 * 书内链接接管（微信读书式脚注弹卡）：
-	 * noteref（epub:type/role=doc-noteref）或目标为 footnote/aside → 弹脚注内容卡；
-	 * 其余链接保持跳转。任何环节失败都退回 goTo——最坏情况等于旧版行为。
+	 * 分级识别脚注 → 弹脚注内容卡；其余链接保持跳转。
+	 * 任何环节失败都退回 goTo——最坏情况等于旧版行为。
 	 */
 	private async handleBookLink(a: HTMLElement | null | undefined, href: string | undefined): Promise<void> {
 		if (!href) return;
+		const trace = (msg: string) => {
+			if (this.plugin.settings.mobileDebug) new Notice(`fleur-epub link: ${msg}`, 4000);
+		};
 		try {
 			const view = this.foliateView;
 			const book = view?.book;
 			if (!view || !book?.resolveHref) return void view?.goTo(href);
 			const resolved = book.resolveHref(href);
-			if (!resolved || typeof resolved.index !== 'number') return void view.goTo(href);
+			if (!resolved || typeof resolved.index !== 'number') {
+				trace(`${href} → jump（resolveHref 失败）`);
+				return void view.goTo(href);
+			}
 			const { index, anchor } = resolved;
 
 			// 目标元素：同章用 live doc（即时、免解析），跨章用 createDocument 离线解析
@@ -2109,18 +2115,28 @@ export class EpubReaderView extends FileView {
 			const live = (view.renderer?.getContents?.() ?? []).find((c: { index?: number }) => c.index === index);
 			if (live?.doc) doc = live.doc as Document;
 			else doc = (await book.sections?.[index]?.createDocument?.()) ?? null;
-			const el: Element | null | undefined = doc ? anchor?.(doc) : null;
-			if (!el) return void view.goTo(href);
+			let el: Element | null | undefined = doc ? anchor?.(doc) : null;
+			// 兜底：folio 的 getHTMLFragment 只认 id，部分书用 name 属性锚点
+			if (!el && doc && href.includes('#')) {
+				const hash = decodeURIComponent(href.split('#')[1] ?? '');
+				if (hash) el = doc.getElementById(hash) ?? doc.querySelector(`[name="${CSS.escape(hash)}"]`);
+			}
+			if (!el) {
+				trace(`${href} → jump（目标元素未找到）`);
+				return void view.goTo(href);
+			}
 
-			// 识别：引用侧标记（noteref）或目标侧标记（footnote / aside）
-			const refMark = `${a?.getAttribute?.('epub:type') ?? ''} ${a?.getAttribute?.('role') ?? ''}`;
-			const elMark = `${el.getAttribute?.('epub:type') ?? ''} ${el.getAttribute?.('role') ?? ''}`;
-			const isNoteref = /noteref/i.test(refMark);
-			const isFootnoteTarget = /footnote|\bnote\b/i.test(elMark) || el.tagName?.toLowerCase() === 'aside';
-			if (!isNoteref && !isFootnoteTarget) return void view.goTo(href);
+			// 分级识别脚注（标准标记 → class → 结构启发式）
+			if (!this.isFootnoteLink(a, el)) {
+				trace(`${href} → jump（非脚注链接）`);
+				return void view.goTo(href);
+			}
 
 			const text = this.extractFootnoteText(el);
-			if (!text) return void view.goTo(href);
+			if (!text) {
+				trace(`${href} → jump（脚注内容为空）`);
+				return void view.goTo(href);
+			}
 
 			// 卡片锚定引用处：取引用元素在宿主坐标的位置（iframe 内 rect → 宿主坐标）
 			let host = this.lastMouseHost;
@@ -2128,10 +2144,37 @@ export class EpubReaderView extends FileView {
 				const rect = a?.getBoundingClientRect?.();
 				if (a?.ownerDocument && rect) host = this.toHostCoords(a.ownerDocument, rect.left, rect.bottom);
 			} catch { /* 忽略，退回鼠标位置 */ }
+			trace(`${href} → 弹卡`);
 			this.showFootnoteCard(text, href, host);
-		} catch {
+		} catch (err) {
+			trace(`${href} → jump（异常 ${err instanceof Error ? err.message : err}）`);
 			this.foliateView?.goTo(href);
 		}
+	}
+
+	/**
+	 * 分级识别脚注链接：
+	 * ① 标准标记：引用侧 epub:type/role=noteref；目标侧 footnote/note、doc-footnote、aside
+	 * ② class 兜底：footnote / noteref / endnote / sidenote（避免过宽的 note 全匹配）
+	 * ③ 结构启发式：短文本标记（上标 / 数字 / 符号序号）指向小块元素 → 视为脚注
+	 */
+	private isFootnoteLink(a: HTMLElement | null | undefined, el: Element | null | undefined): boolean {
+		const mark = (x: Element | null | undefined) =>
+			`${x?.getAttribute?.('epub:type') ?? ''} ${x?.getAttribute?.('role') ?? ''}`;
+		const cls = (x: Element | null | undefined) => x?.getAttribute?.('class') ?? '';
+		if (/noteref/i.test(mark(a))) return true;
+		if (/footnote|sidenote|endnote|\bnote\b/i.test(mark(el))) return true;
+		if (el?.tagName?.toLowerCase() === 'aside') return true;
+		if (/(^|[\s_-])(footnote|noteref|endnote|sidenote)/i.test(`${cls(a)} ${cls(el)}`)) return true;
+		// 结构启发式：引用是短文本（≤8 字符）且含序号形态（数字/星号/剑号/圈码），目标为小块正文
+		const refText = (a?.textContent ?? '').trim();
+		const elText = (el?.textContent ?? '').trim();
+		const markerLike = !!a?.querySelector?.('sup')
+			|| a?.parentElement?.tagName?.toLowerCase() === 'sup'
+			|| /[\d\*\u2020\u2021\u00a7\u2460-\u2473\u3251-\u325f\u32b1-\u32bf]/.test(refText);
+		const shortRef = refText.length > 0 && refText.length <= 8;
+		const smallTarget = elText.length > 0 && elText.length <= 500 && !/^h[1-6]$/i.test(el?.tagName ?? '');
+		return !!(markerLike && shortRef && smallTarget);
 	}
 
 	/** 提取脚注纯文本：按块级元素分段；剥掉回链小链接（↩ / 返回 / ↑ 等）避免噪声 */
