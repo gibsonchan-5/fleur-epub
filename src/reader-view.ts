@@ -445,6 +445,14 @@ export class EpubReaderView extends FileView {
 	private syncReaderViewport(): void {
 		const root = this.contentEl;
 		if (!root?.isConnected) return;
+		if (this.immersive) {
+			// 沉浸全屏：根元素 fixed inset-0 自适应视口（含软键盘挤压后的视口收缩），
+			// 不需要也不允许内联高度——内联 height 会压过 CSS 的 height:auto，
+			// 残留非沉浸时按「可见带」算出的偏小值，表现为底部一大截宿主白底。
+			if (root.style.height) root.style.removeProperty('height');
+			if (root.style.paddingBottom) root.style.removeProperty('padding-bottom');
+			return;
+		}
 		let rect = root.getBoundingClientRect();
 		const band = this.visibleBandBottom() - rect.top;
 		if (band <= 40) return;
@@ -484,6 +492,19 @@ export class EpubReaderView extends FileView {
 		this.immersive = on;
 		document.body.toggleClass('fleur-epub-immersive', on);
 		this.fsBtn?.toggleClass('is-active', on);
+		if (on) {
+			// 进入沉浸：清掉可见带同步写入的内联高度。隐藏导航是纯 CSS 操作，
+			// 不会触发 vv/resize，残留的内联 height（按非沉浸时的可见带计算，
+			// 比全屏矮约一个 chrome 高度）会压过 fixed inset-0 的 height:auto，
+			// 表现为底部留出一大截宿主白底。清掉后根元素随 inset-0 变高，
+			// 尺寸变化沿 reader → foliate-view → 分页器传导，RO 自动重排。
+			this.contentEl.style.removeProperty('height');
+			this.contentEl.style.removeProperty('padding-bottom');
+		} else {
+			// 退出沉浸：立即重算可见带高度（回到普通布局，根元素重新撑满可用区；
+			// 高度变化同样触发分页器重排）
+			this.syncReaderViewport();
+		}
 	}
 
 	/**
