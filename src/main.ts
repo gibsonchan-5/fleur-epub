@@ -1,7 +1,7 @@
 // FleurEPUB — Obsidian EPUB 阅读与批注插件
 // M1：骨架 + foliate-js 渲染 + 进度记忆
 
-import { Events, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
+import { Events, Notice, Platform, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
 import { BookStore, computeFingerprint, type BookData } from './store';
 import { CoverCache } from './cover-cache';
 import { DEFAULT_SETTINGS, FleurEpubSettingTab, type FleurEpubSettings } from './settings';
@@ -57,6 +57,23 @@ export default class FleurEpubPlugin extends Plugin {
 
 		// 移动端标记类：真机移动端 / 桌面调试开关时挂到 body，移动端样式全部限定在该作用域下
 		applyMobileBodyClass(this);
+
+		// ── 移动端诊断（0.2.2 临时）：全局错误浮出 + WebView 版本探针 ──
+		// 背景：真机开书空白且无任何报错，移动端又看不到控制台，需把错误浮到 Notice
+		if (Platform.isMobile) {
+			const ua = /Chrome\/(\S+)/.exec(navigator.userAgent)?.[1] ?? '未知 WebView';
+			new Notice(`[FleurEPUB ${this.manifest.version}] WebView: ${ua}`, 5000);
+			const report = (label: string, e: unknown) => {
+				const msg = e instanceof Error ? e.message : String(e);
+				const stack = e instanceof Error ? (e.stack ?? '') : '';
+				// 只浮与本插件相关的错误（foliate/fleur），避免打扰其他插件
+				if (/foliate|fleur|epub/i.test(msg + stack)) {
+					new Notice(`[FleurEPUB ${label}] ${msg}`, 8000);
+				}
+			};
+			window.addEventListener('error', (ev) => report('err', ev.error ?? ev.message));
+			window.addEventListener('unhandledrejection', (ev) => report('promise', ev.reason));
+		}
 
 		// 指纹迁移：旧版 identifier 撞号（z-lib 通用 UUID）修复后，按新算法重命名历史数据文件
 		await this.migrateBookFingerprints();

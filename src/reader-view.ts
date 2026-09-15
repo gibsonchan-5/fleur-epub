@@ -348,10 +348,17 @@ export class EpubReaderView extends FileView {
 	}
 
 	private async loadBook(file: TFile): Promise<void> {
+		// 移动端诊断浮标（0.2.2 临时）：书架正常但开书空白且无报错，
+		// 需要用户反馈停在哪一阶段（ suspected：移动端 WebView/CSP 拦截 blob iframe，init 永挂不抛错）
+		const dbg = isMobileUI(this.plugin);
+		const stage = (msg: string, long = false) => {
+			if (dbg) new Notice(`[FleurEPUB] ${msg}`, long ? 8000 : 2200);
+		};
 		try {
 			const bytes = await this.app.vault.readBinary(file);
 			// foliate-js makeBook 直接接受 File 对象（内部走 vendor/zip.js 解压）
 			const fileObj = new File([bytes], file.name, { type: 'application/epub+zip' });
+			stage('① EPUB 数据已读取');
 
 			this.readerEl.empty();
 
@@ -431,6 +438,14 @@ export class EpubReaderView extends FileView {
 
 			this.readerEl.appendChild(view);
 			await view.open(fileObj);
+			stage('② EPUB 格式解析完成');
+
+			// 渲染看门狗：首个章节 load 事件 15s 内未到 → 大概率 iframe（blob:）被移动端拦
+			let firstLoad = false;
+			view.addEventListener('load', () => {
+				firstLoad = true;
+				stage('③ 章节 iframe 已加载');
+			}, { once: true });
 
 			// 阅读模式与翻页动画
 			this.applyFlow();
@@ -461,6 +476,11 @@ export class EpubReaderView extends FileView {
 			this.titleEl.setText(meta.title ?? file.basename);
 
 			const cfi = this.bookData.progress?.cfi;
+			const watchdog = window.setTimeout(() => {
+				if (!firstLoad) {
+					stage('③ 渲染超时：章节 iframe 15s 未加载（怀疑移动端拦截 blob iframe）', true);
+				}
+			}, 15000);
 			if (cfi) {
 				try {
 					await view.goTo(cfi);
@@ -471,13 +491,17 @@ export class EpubReaderView extends FileView {
 			} else {
 				await view.init({ lastLocation: undefined });
 			}
+			window.clearTimeout(watchdog);
+			stage('④ 渲染完成，可以阅读');
 
 			this.loadedPath = file.path;
 			this.plugin.events.trigger('fleur-epub:book-opened');
 			console.log(`[FleurEPUB] 已打开：${file.basename}（指纹 ${this.fingerprint}）`);
 		} catch (err) {
 			console.error('[FleurEPUB] 打开 EPUB 失败', err);
-			new Notice('EPUB 打开失败，请查看控制台', 4000);
+			// 移动端无控制台：直接浮出错误信息（诊断用）
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`EPUB 打开失败：${msg}`, 8000);
 			this.readerEl.empty();
 			this.readerEl
 				.createDiv('fleur-epub-error')
