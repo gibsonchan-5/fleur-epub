@@ -636,7 +636,8 @@ export class ShelfView extends ItemView {
 		]);
 		delCommentBtn.addEventListener('click', () => {
 			const r = this.plugin.getActiveReader();
-			if (r) void r.updateAnnotationComment(ann.id, undefined).then(() => new Notice('已删除批注', 1500));
+			// 删除结果在该卡片内立即可见，不弹提示
+			if (r) void r.updateAnnotationComment(ann.id, undefined);
 			this.renderAddCommentHint(slot, ann);
 		});
 	}
@@ -682,8 +683,8 @@ export class ShelfView extends ItemView {
 			ann.comment = val;
 			const r = this.plugin.getActiveReader();
 			if (r) void r.updateAnnotationComment(ann.id, val);
+			// 保存后卡片即刻切到批注内容，不弹「批注已保存」
 			this.renderCommentDisplay(slot, ann);
-			new Notice('批注已保存', 1500);
 		});
 
 		textarea.addEventListener('keydown', (e: KeyboardEvent) => {

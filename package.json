@@ -1,6 +1,6 @@
 {
   "name": "fleur-epub",
-  "version": "0.2.21",
+  "version": "0.2.22",
   "description": "Read EPUB books with highlights, wavy underlines, comments, full-text search and AI annotations — the FleurPDF experience for e-books.",
   "main": "main.js",
   "scripts": {

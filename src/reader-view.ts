@@ -552,9 +552,10 @@ export class EpubReaderView extends FileView {
 	}
 
 	private async loadBook(file: TFile): Promise<void> {
-		// 移动端诊断浮标（0.2.2 临时）：书架正常但开书空白且无报错，
-		// 需要用户反馈停在哪一阶段（ suspected：移动端 WebView/CSP 拦截 blob iframe，init 永挂不抛错）
-		const dbg = isMobileUI(this.plugin);
+		// 开书诊断链（①读取 → ②解析 → ③章节 iframe → ④可阅读）：早期用于排查
+		// 移动端「开书空白无报错」，现仅在「设置 → 高级 → 移动端调试模式」开启时输出；
+		// 普通使用时开书不再弹任何阶段提示。
+		const dbg = isMobileUI(this.plugin) && this.plugin.settings.mobileDebug;
 		const stage = (msg: string, long = false) => {
 			if (dbg) new Notice(`[FleurEPUB] ${msg}`, long ? 8000 : 2200);
 		};
@@ -708,14 +709,15 @@ export class EpubReaderView extends FileView {
 			this.titleEl.setText(meta.title ?? file.basename);
 
 			const cfi = this.bookData.progress?.cfi;
-			const watchdog = window.setTimeout(() => {
+			// 看门狗只在调试模式下挂（避免普通使用白留一个空转计时器）
+			const watchdog = dbg ? window.setTimeout(() => {
 				if (!firstLoad) {
 					// 诊断链：vendor load() 埋点（blob/srcdoc 路径选择、fetch、srcdoc 设置）
 					const chain = (window as any).__fleur_epub_diag as string[] | undefined;
 					const tail = chain?.length ? `\n${chain.slice(-6).join('\n')}` : '\n[诊断链为空：srcdoc 分支未执行]';
 					stage(`③ 渲染超时：章节 iframe 15s 未加载${tail}`, true);
 				}
-			}, 15000);
+			}, 15000) : 0;
 			if (cfi) {
 				try {
 					await view.goTo(cfi);
@@ -797,8 +799,8 @@ export class EpubReaderView extends FileView {
 
 		if (engine.isActive()) {
 			engine.setActive(false);
+			// 译文随即从正文消失、「译」按钮态同步变化 → 不再弹提示
 			this.renderTranslateState();
-			new Notice('已关闭对照翻译', 1400);
 			return;
 		}
 
@@ -857,9 +859,9 @@ export class EpubReaderView extends FileView {
 			return;
 		}
 		void engine.translateParagraphEl(p).then((r) => {
-			if (r === 'ok') new Notice('已嵌入译文', 1500);
-			else if (r === 'fail') new Notice(`翻译失败：${engine.getLastError() ?? '请检查 AI 设置与网络'}`, 4000);
-			else new Notice('该段无需翻译（已是中文或与原文本相同）', 2000);
+			// 成功时译文直接出现在该段下方，不弹提示；失败/无需翻译才需要说明
+			if (r === 'fail') new Notice(`翻译失败：${engine.getLastError() ?? '请检查 AI 设置与网络'}`, 4000);
+			else if (r !== 'ok') new Notice('该段无需翻译（已是中文或与原文本相同）', 2000);
 		});
 	}
 
@@ -1495,9 +1497,8 @@ export class EpubReaderView extends FileView {
 	private async createAnnotation(kind: AnnotationKind, color: string): Promise<EpubAnnotation | null> {
 		const seed = this.captureSelectionAnchor();
 		if (!seed) return null;
-		const ann = await this.createAnnotationAt(seed.cfi, seed.text, kind, color);
-		new Notice(kind === 'highlight' ? '已高亮' : kind === 'wavy' ? '已加波浪线' : '已划线', 1600);
-		return ann;
+		// 不再弹「已高亮/已划线」提示：标注结果就在眼前，toast 只会打断阅读
+		return this.createAnnotationAt(seed.cfi, seed.text, kind, color);
 	}
 
 	/** 捕获当前选区的 CFI 锚点（打开 AI 面板前快照，供「写入批注」延迟落点） */
@@ -1566,7 +1567,7 @@ export class EpubReaderView extends FileView {
 		}
 		this.saveBookData();
 		this.plugin.notifyAnnotationsChanged();
-		new Notice('已删除标注', 1500);
+		// 删除结果在正文里立刻可见，不再弹提示
 	}
 
 	// ── 选择工具条：高亮五色 / 划线 / 波浪线 / 复制 / AI ──
@@ -2261,7 +2262,7 @@ export class EpubReaderView extends FileView {
 			this.saveBookData();
 			// 广播变更（侧边栏即时刷新）
 			this.plugin.notifyAnnotationsChanged();
-			new Notice('批注已保存', 1500);
+			// 保存后弹窗关闭、批注就在正文里，不再弹「批注已保存」提示
 			this.hideAnnPopup();
 		};
 

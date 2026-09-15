@@ -58,18 +58,23 @@ export default class FleurEpubPlugin extends Plugin {
 		// 移动端标记类：真机移动端 / 桌面调试开关时挂到 body，移动端样式全部限定在该作用域下
 		applyMobileBodyClass(this);
 
-		// ── 移动端诊断（0.2.2 临时）：全局错误浮出 + WebView 版本探针 ──
-		// 背景：真机开书空白且无任何报错，移动端又看不到控制台，需把错误浮到 Notice
-		if (Platform.isMobile) {
+		// ── 移动端诊断（0.2.2 排查用，现仅在「设置 → 高级 → 移动端调试模式」开启时输出）──
+		// 背景：真机开书空白且无任何报错，移动端又看不到控制台，需把错误浮到 Notice。
+		// 普通使用不再弹启动探针；真实错误仍会浮出（同一错误只提示一次，避免刷屏）。
+		if (Platform.isMobile && this.settings.mobileDebug) {
 			const ua = /Chrome\/(\S+)/.exec(navigator.userAgent)?.[1] ?? '未知 WebView';
 			new Notice(`[FleurEPUB ${this.manifest.version}] WebView: ${ua}`, 5000);
+		}
+		if (Platform.isMobile) {
+			const reported = new Set<string>();
 			const report = (label: string, e: unknown) => {
 				const msg = e instanceof Error ? e.message : String(e);
 				const stack = e instanceof Error ? (e.stack ?? '') : '';
 				// 只浮与本插件相关的错误（foliate/fleur），避免打扰其他插件
-				if (/foliate|fleur|epub/i.test(msg + stack)) {
-					new Notice(`[FleurEPUB ${label}] ${msg}`, 8000);
-				}
+				if (!/foliate|fleur|epub/i.test(msg + stack)) return;
+				if (reported.has(msg)) return;
+				reported.add(msg);
+				new Notice(`[FleurEPUB ${label}] ${msg}`, 8000);
 			};
 			window.addEventListener('error', (ev) => report('err', ev.error ?? ev.message));
 			window.addEventListener('unhandledrejection', (ev) => report('promise', ev.reason));

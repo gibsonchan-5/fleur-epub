@@ -709,7 +709,7 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('移动端调试模式')
-			.setDesc('在桌面端强制启用移动端布局（顶栏紧凑化、底部安全区等），用于预览与开发。关闭后桌面端完全恢复原状，不影响任何桌面功能。')
+			.setDesc('在桌面端强制启用移动端布局（顶栏紧凑化、底部安全区等），用于预览与开发。开启后还会输出开书阶段诊断与链接识别等排查提示。关闭后桌面端完全恢复原状，不影响任何桌面功能。')
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.mobileDebug).onChange(async (v) => {
 					this.plugin.settings.mobileDebug = v;

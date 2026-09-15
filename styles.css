@@ -897,17 +897,18 @@ body.fleur-epub-mobile .fleur-epub-annquick-btn {
 	height: 38px;
 }
 body.fleur-epub-mobile .fleur-epub-annquick-btn.is-wide {
-	/* 清除动作：紧凑胶囊（此前 38px 高的大按钮在平板上显得笨重） */
-	height: 30px;
-	padding: 0 12px;
-	gap: 5px;
-	font-size: 12.5px;
+	/* 清除动作：紧凑但不过窄的胶囊（比旧的 38px 大按钮轻，比 30px 版更易点） */
+	height: 32px;
+	min-width: 120px;
+	padding: 0 18px;
+	gap: 6px;
+	font-size: 13px;
 	border-radius: 999px;
 	background: var(--background-secondary, rgba(127, 127, 127, 0.12));
 }
 body.fleur-epub-mobile .fleur-epub-annquick-btn.is-wide .fleur-epub-annquick-icon svg {
-	width: 15px;
-	height: 15px;
+	width: 16px;
+	height: 16px;
 }
 /* 清除专用卡：贴住胶囊即可，不再撑到 min-width 200px */
 body.fleur-epub-mobile .fleur-epub-annquick.is-clear-only {
