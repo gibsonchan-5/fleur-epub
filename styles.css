@@ -2021,7 +2021,7 @@ body.fleur-epub-mobile .fleur-epub-mselbar {
 	display: flex;
 	align-items: center;
 	gap: 4px;
-	padding: 7px 9px;
+	padding: 6px 10px;
 	max-width: calc(100vw - 16px);
 	/* 兜底：极端窄屏（或带「擦除」附加项）放不下时横向滑动，
 	   而不是把色点/按钮压扁——色点被 flex 挤成 0 宽会直接看不见 */
