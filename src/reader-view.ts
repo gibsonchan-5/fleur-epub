@@ -268,8 +268,10 @@ export class EpubReaderView extends FileView {
 		});
 		this.translateBtn = trBtn;
 
-		// 顶栏「听」（移动端 + 桌面对齐）：微信读书式听书，Web Speech API
-		if (ReaderTTS.supported()) {
+		// 顶栏「听」：微信读书式听书。
+		// 移动端恒显示（安卓 WebView 无系统语音，但可走在线引擎，按钮必须可点）；
+		// 桌面端仅在系统语音可用时显示，与旧版一致。
+		if (ReaderTTS.buttonVisible(this.plugin)) {
 			this.tts = new ReaderTTS(this);
 			// 播放状态 → 顶栏「听」点亮/熄灭（暂停时半亮，由 CSS 处理）
 			this.ttsUnsub = this.tts.onStateChange((s) => {

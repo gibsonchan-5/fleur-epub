@@ -1,13 +1,23 @@
-// 移动端顶栏「听」：Web Speech API（speechSynthesis）句级朗读 + 微信读书式播放器。
-// 选型：零依赖、免费、离线，iOS/Android WebView 与桌面 Electron 均内置。
-// 暂停语义：句级暂停（cancel + 续播时从当前句头重读）——speechSynthesis.pause
-// 在移动端 WebView 兼容性差，句级重读是跨端最稳的等价体验。
-// 跟读高亮：每句 onstart 在原文加灰底高亮；停止/翻页/翻章自动清除。
+// 听书引擎：句级朗读 + 微信读书式播放器。
+//
+// 两个引擎：
+//   system —— Web Speech API（speechSynthesis）。零依赖、免费、离线；
+//             但 Android WebView 不提供该 API（MDN：WebView Android 不支持），
+//             所以安卓上必须走在线引擎。
+//   online —— 在线语音合成（OpenAI 兼容 /audio/speech，见 tts-online.ts）。
+//             需网络与密钥，跨端一致，音色更好；暂停/续播用音频原生语义（真暂停）。
+//
+// 跟读高亮：每句开读在原文加灰底高亮；停止/翻页/翻章自动清除。
 
 import { Notice } from 'obsidian';
+import type FleurEpubPlugin from './main';
 import type { EpubReaderView } from './reader-view';
+import { isMobileUI } from './platform';
+import { onlineTtsReady, synthesizeOnline } from './tts-online';
 
 export type TTSItem = { el: HTMLElement; text: string };
+
+export type TTSEngine = 'system' | 'online';
 
 export type TTSState = {
 	/** 已加载章节并处于播放/暂停会话中 */
@@ -21,6 +31,8 @@ export type TTSState = {
 	rate: number;
 	/** 当前句文本（播放器展示用） */
 	sentence: string;
+	/** 当前引擎（播放器展示 / 切换用） */
+	engine: TTSEngine;
 };
 
 /** 预设语速（微信读书式 0.75x–2.0x） */
@@ -41,6 +53,13 @@ export class ReaderTTS {
 	/** 系统声源列表（voiceschanged 异步到达，到达后广播） */
 	private voices: SpeechSynthesisVoice[] = [];
 	private onVoicesChangedHandler: (() => void) | null = null;
+	/** 在线引擎：当前音频元素与对象 URL（每句一个，切句即释放） */
+	private audio: HTMLAudioElement | null = null;
+	private audioUrl: string | null = null;
+	/** 在线引擎：预取缓存（句下标 → 对象 URL），换句即用，减少等待 */
+	private prefetch = new Map<number, string>();
+	/** 在线引擎：预取在途标记，避免重复请求同一句 */
+	private prefetching = new Set<number>();
 
 	constructor(view: EpubReaderView) {
 		this.view = view;
@@ -58,9 +77,49 @@ export class ReaderTTS {
 		}
 	}
 
-	/** 当前环境是否支持 Web Speech API */
+	/** 当前环境是否支持 Web Speech API（系统引擎） */
 	static supported(): boolean {
 		return typeof window !== 'undefined' && 'speechSynthesis' in window;
+	}
+
+	/**
+	 * 「听」按钮是否出现：
+	 * - 移动端恒显示（安卓 WebView 没有系统语音，但可走在线引擎，按钮必须可见可点）
+	 * - 桌面端仅系统引擎可用时显示（与旧版一致，零变化）
+	 */
+	static buttonVisible(plugin: FleurEpubPlugin): boolean {
+		return isMobileUI(plugin) || ReaderTTS.supported();
+	}
+
+	/**
+	 * 实际生效的引擎：用户选择优先；选了系统引擎但环境没有（安卓 WebView）
+	 * 则自动落到在线引擎，并在开始朗读时给出配置指引。
+	 */
+	engine(): TTSEngine {
+		const want = this.view.plugin.settings.ttsEngine;
+		if (want === 'online') return 'online';
+		return ReaderTTS.supported() ? 'system' : 'online';
+	}
+
+	/** 切换引擎并持久化（切换会中断当前朗读，避免两个引擎同时出声） */
+	setEngine(engine: TTSEngine): void {
+		if (this.view.plugin.settings.ttsEngine === engine) return;
+		this.view.plugin.settings.ttsEngine = engine;
+		void this.view.plugin.saveSettings();
+		const wasActive = this.active;
+		this.stop();
+		if (wasActive) this.start();
+		else this.emit();
+	}
+
+	/** 在线引擎是否已配置（地址 + 密钥） */
+	onlineReady(): boolean {
+		return onlineTtsReady(this.view.plugin.settings);
+	}
+
+	/** 当前引擎是否可用（用于开始前的提示判定） */
+	ready(): boolean {
+		return this.engine() === 'online' ? this.onlineReady() : ReaderTTS.supported();
 	}
 
 	// ── 声源（合规来源：仅系统内置 TTS 语音，免费离线） ──
@@ -151,6 +210,7 @@ export class ReaderTTS {
 			total: this.items.length,
 			rate: this.rate,
 			sentence: this.items[this.index]?.text ?? '',
+			engine: this.engine(),
 		};
 	}
 
@@ -188,8 +248,12 @@ export class ReaderTTS {
 	/** 从当前句开始朗读本章（章节句级切分由 reader-view 提供） */
 	start(): void {
 		if (this.active) return;
-		if (!ReaderTTS.supported()) {
-			new Notice('当前环境不支持语音朗读', 2200);
+		if (!this.ready()) {
+			if (this.engine() === 'online') {
+				new Notice('听书需要在线语音：请在设置 → 听书里填入语音接口地址与密钥', 4200);
+			} else {
+				new Notice('当前环境不支持语音朗读', 2200);
+			}
 			return;
 		}
 		const chapter = this.view.getTTSChapter();
@@ -206,24 +270,37 @@ export class ReaderTTS {
 		this.speakCurrent();
 	}
 
-	/** 句级暂停：停止出声但保留进度与高亮（微信读书「点句子暂停」语义） */
+	/** 句级暂停：系统引擎停止出声（保留进度与高亮）；在线引擎为音频原生暂停 */
 	pause(): void {
 		if (!this.active || this.paused) return;
 		this.paused = true;
-		this.gen++;
-		try {
-			window.speechSynthesis?.cancel();
-		} catch {
-			/* 忽略 */
+		if (this.engine() === 'online') {
+			// 原生暂停：保留播放位置，续播从断点继续。
+			// 注意不能在这里 gen++：当前句的 onended 会因此失效，续播到句末链条就断了。
+			try {
+				this.audio?.pause();
+			} catch {
+				/* 忽略 */
+			}
+		} else {
+			// 系统引擎：作废在途 utterance 回调（续播从当前句头重读）
+			this.gen++;
+			this.cancelSpeech();
 		}
 		this.speaking = false;
 		this.emit();
 	}
 
-	/** 续播：从当前句头重读（跨端最稳的暂停等价实现） */
+	/** 续播：在线引擎从断点继续；系统引擎从当前句头重读（跨端最稳的等价实现） */
 	resume(): void {
 		if (!this.active || !this.paused) return;
 		this.paused = false;
+		if (this.engine() === 'online' && this.audio && this.audio.currentTime > 0) {
+			void this.audio.play().catch(() => this.speakCurrent());
+			this.speaking = true;
+			this.emit();
+			return;
+		}
 		this.speakCurrent();
 	}
 
@@ -236,11 +313,9 @@ export class ReaderTTS {
 		this.paused = false;
 		this.items = [];
 		this.index = 0;
-		try {
-			window.speechSynthesis?.cancel();
-		} catch {
-			/* 忽略 */
-		}
+		this.cancelSpeech();
+		this.releaseAudio();
+		this.clearPrefetch();
 		this.view.clearTTSHighlight();
 		if (was && notice) new Notice('已停止朗读', 1200);
 		this.emit();
@@ -283,14 +358,35 @@ export class ReaderTTS {
 		this.seek(Math.max(0, this.index - 1));
 	}
 
-	/** 设置语速：持久化；朗读中即时生效（从当前句头以新语速重读） */
+	/** 设置语速：持久化；朗读中即时生效 */
 	setRate(rate: number): void {
 		if (!TTS_RATES.includes(rate) || rate === this.rate) return;
 		this.rate = rate;
 		this.view.plugin.settings.ttsRate = rate;
 		void this.view.plugin.saveSettings();
+		if (this.engine() === 'online') {
+			// 在线：音频原生变速，不重新合成（省流量、无延迟）
+			if (this.audio) this.audio.playbackRate = rate;
+			this.emit();
+			return;
+		}
 		if (this.active && !this.paused) this.speakCurrent();
 		else this.emit();
+	}
+
+	/** 在线引擎：选择音色（持久化；朗读中从当前句以新音色重读） */
+	setOnlineVoice(voice: string): void {
+		if (!voice || voice === this.view.plugin.settings.ttsOnlineVoice) return;
+		this.view.plugin.settings.ttsOnlineVoice = voice;
+		void this.view.plugin.saveSettings();
+		this.clearPrefetch();
+		if (this.active && !this.paused) this.speakCurrent();
+		else this.emit();
+	}
+
+	/** 在线引擎：当前音色 id */
+	getOnlineVoice(): string {
+		return this.view.plugin.settings.ttsOnlineVoice;
 	}
 
 	// ── 内部 ──
@@ -306,6 +402,10 @@ export class ReaderTTS {
 			return;
 		}
 		const item = this.items[this.index];
+		if (this.engine() === 'online') {
+			this.speakOnline(item, myGen);
+			return;
+		}
 		this.cancelSpeech();
 		const u = new SpeechSynthesisUtterance(item.text);
 		if (this.lang) u.lang = this.lang;
@@ -336,6 +436,118 @@ export class ReaderTTS {
 		}
 	}
 
+	// ── 在线引擎：合成 → 播放；下一句预取，切句无等待 ──
+
+	private speakOnline(item: TTSItem, myGen: number): void {
+		this.releaseAudio();
+		const idx = this.index;
+		// 句首即高亮（在线的首字节延迟来自网络，先让用户看到读到哪）
+		this.view.highlightTTSSentence(item.el, item.text);
+		this.emit();
+		void this.fetchAudio(idx)
+			.then((url) => {
+				if (myGen !== this.gen || !this.active) {
+					URL.revokeObjectURL(url);
+					return;
+				}
+				if (this.paused) {
+					// 合成期间被暂停：留着备用，续播直接命中，不重复请求
+					this.prefetch.set(idx, url);
+					return;
+				}
+				const audio = new Audio(url);
+				this.audio = audio;
+				this.audioUrl = url;
+				audio.playbackRate = this.rate;
+				audio.onended = () => {
+					if (myGen !== this.gen || !this.active) return;
+					this.index = idx + 1;
+					this.speakCurrent();
+				};
+				audio.onerror = () => {
+					if (myGen !== this.gen) return;
+					this.stop();
+					new Notice('语音播放失败', 2200);
+				};
+				return audio.play().then(() => {
+					if (myGen !== this.gen) return;
+					this.speaking = true;
+					this.emit();
+					// 播放畅顺后预取下一句，连续朗读基本无感等待
+					void this.prefetchAt(idx + 1);
+				});
+			})
+			.catch((err: unknown) => {
+				if (myGen !== this.gen || this.paused || !this.active) return;
+				this.stop();
+				const msg = err instanceof Error ? err.message : String(err);
+				new Notice(`听书失败：${msg}`, 4200);
+			});
+	}
+
+	/** 取第 i 句的音频对象 URL：命中预取缓存直接用，否则即时合成 */
+	private async fetchAudio(i: number): Promise<string> {
+		const cached = this.prefetch.get(i);
+		if (cached) {
+			this.prefetch.delete(i);
+			return cached;
+		}
+		const item = this.items[i];
+		if (!item) throw new Error('句子已失效');
+		const s = this.view.plugin.settings;
+		const blob = await synthesizeOnline(
+			{
+				baseUrl: s.ttsOnlineBaseUrl,
+				apiKey: s.ttsOnlineApiKey,
+				model: s.ttsOnlineModel,
+				voice: s.ttsOnlineVoice,
+				lang: this.lang,
+			},
+			item.text,
+		);
+		return URL.createObjectURL(blob);
+	}
+
+	/** 预取下一句（失败静默：播放时再重试并提示） */
+	private async prefetchAt(i: number): Promise<void> {
+		if (i >= this.items.length) return;
+		if (this.prefetch.has(i) || this.prefetching.has(i)) return;
+		this.prefetching.add(i);
+		try {
+			const url = await this.fetchAudio(i);
+			this.prefetch.set(i, url);
+		} catch {
+			/* 预取失败不打扰用户 */
+		} finally {
+			this.prefetching.delete(i);
+		}
+	}
+
+	private clearPrefetch(): void {
+		for (const url of this.prefetch.values()) URL.revokeObjectURL(url);
+		this.prefetch.clear();
+		this.prefetching.clear();
+	}
+
+	/** 释放当前音频与对象 URL（切句/停止时调用） */
+	private releaseAudio(): void {
+		if (this.audio) {
+			try {
+				this.audio.pause();
+				this.audio.onended = null;
+				this.audio.onerror = null;
+				this.audio.src = '';
+			} catch {
+				/* 忽略 */
+			}
+			this.audio = null;
+		}
+		if (this.audioUrl) {
+			URL.revokeObjectURL(this.audioUrl);
+			this.audioUrl = null;
+		}
+	}
+
 	private cancelSpeech(): void {
 		try {
 			window.speechSynthesis?.cancel();
@@ -346,6 +558,7 @@ export class ReaderTTS {
 
 	destroy(): void {
 		this.stop();
+		this.clearPrefetch();
 		try {
 			if (this.onVoicesChangedHandler) {
 				window.speechSynthesis?.removeEventListener?.('voiceschanged', this.onVoicesChangedHandler);

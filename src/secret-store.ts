@@ -17,7 +17,7 @@
 import type { App } from 'obsidian';
 
 /** Settings fields that must never be persisted as plain text on the keychain backend. */
-export const SECRET_FIELDS = ['apiKey'] as const;
+export const SECRET_FIELDS = ['apiKey', 'ttsOnlineApiKey'] as const;
 
 export type SecretField = typeof SECRET_FIELDS[number];
 
@@ -30,6 +30,7 @@ export type SecretBackend = 'system' | 'vault';
  */
 export const SECRET_IDS: Record<SecretField, string> = {
   apiKey: 'fleur-epub-api-key',
+  ttsOnlineApiKey: 'fleur-epub-tts-api-key',
 };
 
 interface SecretStorageLike {

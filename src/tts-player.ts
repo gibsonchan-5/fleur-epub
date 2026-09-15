@@ -4,8 +4,9 @@
 
 import { App, Modal, setIcon } from 'obsidian';
 import type { EpubReaderView } from './reader-view';
-import { TTS_RATES } from './tts';
+import { ReaderTTS, TTS_RATES } from './tts';
 import type { TTSState } from './tts';
+import { onlineVoices, ONLINE_TTS_PRESETS } from './tts-online';
 
 /**
  * 在容器内构建播放器 UI（容器需自行布局：sheet body 或 modal content）。
@@ -36,28 +37,69 @@ export function buildTTSPlayer(container: HTMLElement, view: EpubReaderView): ()
 		rateBtns.set(r, b);
 	}
 
-	// 声源（系统内置 TTS 语音：免费离线、完全合规）：横滑 chips，点击即换并持久化
-	container.createDiv('fleur-epub-tts-caption').setText('声源 · 系统语音');
+	// 引擎切换：系统语音（免费离线）/ 在线语音（安卓 WebView 没有系统语音，只能走在线）
+	const engineRow = container.createDiv('fleur-epub-tts-engines');
+	const engineBtns = new Map<string, HTMLElement>();
+	const systemOk = ReaderTTS.supported();
+	const engines: { v: 'system' | 'online'; label: string; hint: string }[] = [
+		{ v: 'system', label: '系统语音', hint: systemOk ? '免费离线，随系统音色' : '当前平台不支持系统朗读' },
+		{ v: 'online', label: '在线语音', hint: tts.onlineReady() ? '需网络，音色更好' : '未配置：设置 → 听书 填入接口与密钥' },
+	];
+	for (const e of engines) {
+		const b = engineRow.createDiv('fleur-epub-tts-engine');
+		b.setText(e.label);
+		b.setAttribute('aria-label', e.hint);
+		if (e.v === 'system' && !systemOk) b.addClass('is-disabled');
+		b.addEventListener('click', () => {
+			if (e.v === 'system' && !systemOk) return;
+			tts.setEngine(e.v);
+			sync(tts.getState());
+		});
+		engineBtns.set(e.v, b);
+	}
+
+	// 声源：系统 = 内置语音 chips；在线 = 当前提供商的音色 chips
+	const caption = container.createDiv('fleur-epub-tts-caption');
 	const voiceScroll = container.createDiv('fleur-epub-tts-voice-scroll');
+	let lastVoiceKey = '';
 	const renderVoices = () => {
 		voiceScroll.empty();
-		const current = tts.getVoiceURI();
-		const mk = (label: string, uri: string, title: string) => {
+		const engine = tts.engine();
+		caption.setText(engine === 'online' ? '声源 · 在线语音' : '声源 · 系统语音');
+		const mk = (label: string, id: string, title: string, active: boolean, onPick: () => void) => {
 			const chip = voiceScroll.createDiv('fleur-epub-tts-voice');
 			chip.setText(label);
 			chip.setAttribute('aria-label', title);
-			chip.toggleClass('is-active', uri === current);
-			chip.addEventListener('click', () => tts.setVoice(uri));
+			chip.toggleClass('is-active', active);
+			chip.addEventListener('click', onPick);
 		};
-		mk('自动', '', '跟随章节语言由系统选择');
+		if (engine === 'online') {
+			const provider = view.plugin.settings.ttsOnlineProvider;
+			const current = tts.getOnlineVoice();
+			const list = onlineVoices(provider);
+			if (!list.length) {
+				// 自定义提供商：没有预置音色，只展示当前值（在设置里改）
+				mk(current || '未设置音色', current, '当前音色（在设置中修改）', true, () => {});
+				return;
+			}
+			for (const v of list) {
+				mk(v.label, v.id, v.id, v.id === current, () => tts.setOnlineVoice(v.id));
+			}
+			if (current && !list.some((v) => v.id === current)) {
+				mk(current, current, current, true, () => {});
+			}
+			return;
+		}
+		const current = tts.getVoiceURI();
+		mk('自动', '', '跟随章节语言由系统选择', current === '', () => tts.setVoice(''));
 		const voices = tts.listVoices(view.getTTSChapterLang());
 		for (const v of voices) {
-			mk(v.name, v.voiceURI, `${v.name} (${v.lang})`);
+			mk(v.name, v.voiceURI, `${v.name} (${v.lang})`, v.voiceURI === current, () => tts.setVoice(v.voiceURI));
 		}
 		// 当前选中项若被精选列表排除，补进列表（保证可见、可切回「自动」）
 		if (current && !voices.some((v) => v.voiceURI === current)) {
 			const v = tts.findVoice(current);
-			if (v) mk(v.name, v.voiceURI, `${v.name} (${v.lang})`);
+			if (v) mk(v.name, current, `${v.name} (${v.lang})`, true, () => {});
 		}
 	};
 
@@ -84,17 +126,17 @@ export function buildTTSPlayer(container: HTMLElement, view: EpubReaderView): ()
 		setIcon(playIcon, s.active && !s.paused ? 'pause' : 'play');
 		playBtn.toggleClass('is-playing', s.active && !s.paused);
 		for (const [r, b] of rateBtns) b.toggleClass('is-active', r === s.rate);
-		// 声源列表异步到达（voiceschanged）或选择变化后补渲染；句推进时不重绘
-		const n = tts.listVoices().length;
-		const uri = tts.getVoiceURI();
-		if (n !== lastVoiceCount || uri !== lastVoiceURI) {
-			lastVoiceCount = n;
-			lastVoiceURI = uri;
+		for (const [v, b] of engineBtns) b.toggleClass('is-active', v === s.engine);
+		// 声源列表异步到达（voiceschanged）/ 引擎或音色变化后补渲染；句推进时不重绘
+		const engine = s.engine;
+		const key = engine === 'online'
+			? `online:${view.plugin.settings.ttsOnlineProvider}:${tts.getOnlineVoice()}`
+			: `system:${tts.getVoiceURI()}:${tts.listVoices().length}`;
+		if (key !== lastVoiceKey) {
+			lastVoiceKey = key;
 			renderVoices();
 		}
 	};
-	let lastVoiceCount = -1;
-	let lastVoiceURI: string | null = null;
 	const unsub = tts.onStateChange(sync);
 	sync(tts.getState());
 	return unsub;
