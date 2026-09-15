@@ -480,6 +480,14 @@ export class EpubReaderView extends FileView {
 				this.showAnnotationViewer(ann, dhost.x, dhost.y);
 			});
 
+			// 书内链接接管（微信读书式）：先 preventDefault 拿下控制权，再异步分类——
+			// 脚注/尾注 → 内容卡片弹窗；其余链接 → 自行 goTo 保持跳转。
+			// 不能放行默认跳转再异步弹卡，否则脚注会「跳转 + 弹卡」双触发。
+			view.addEventListener('link', (e: CustomEvent) => {
+				e.preventDefault();
+				void this.handleBookLink(e.detail?.a, e.detail?.href);
+			});
+
 			// 翻页 / 滚动时收起全部浮层，并按新视口重排翻译优先级（节流）
 			view.addEventListener('relocate', (e: CustomEvent) => {
 				// 位置未变的 relocate 不得关闭浮层：移动端每次 touchend 都会触发 snap 校正，
@@ -2079,6 +2087,86 @@ export class EpubReaderView extends FileView {
 			if (top + bh > window.innerHeight - 8) top = Math.max(8, hostY - bh - 14);
 			pop.setCssStyles({ left: `${left}px`, top: `${top}px`, visibility: '' });
 		});
+	}
+
+	/**
+	 * 书内链接接管（微信读书式脚注弹卡）：
+	 * noteref（epub:type/role=doc-noteref）或目标为 footnote/aside → 弹脚注内容卡；
+	 * 其余链接保持跳转。任何环节失败都退回 goTo——最坏情况等于旧版行为。
+	 */
+	private async handleBookLink(a: HTMLElement | null | undefined, href: string | undefined): Promise<void> {
+		if (!href) return;
+		try {
+			const view = this.foliateView;
+			const book = view?.book;
+			if (!view || !book?.resolveHref) return void view?.goTo(href);
+			const resolved = book.resolveHref(href);
+			if (!resolved || typeof resolved.index !== 'number') return void view.goTo(href);
+			const { index, anchor } = resolved;
+
+			// 目标元素：同章用 live doc（即时、免解析），跨章用 createDocument 离线解析
+			let doc: Document | null = null;
+			const live = (view.renderer?.getContents?.() ?? []).find((c: { index?: number }) => c.index === index);
+			if (live?.doc) doc = live.doc as Document;
+			else doc = (await book.sections?.[index]?.createDocument?.()) ?? null;
+			const el: Element | null | undefined = doc ? anchor?.(doc) : null;
+			if (!el) return void view.goTo(href);
+
+			// 识别：引用侧标记（noteref）或目标侧标记（footnote / aside）
+			const refMark = `${a?.getAttribute?.('epub:type') ?? ''} ${a?.getAttribute?.('role') ?? ''}`;
+			const elMark = `${el.getAttribute?.('epub:type') ?? ''} ${el.getAttribute?.('role') ?? ''}`;
+			const isNoteref = /noteref/i.test(refMark);
+			const isFootnoteTarget = /footnote|\bnote\b/i.test(elMark) || el.tagName?.toLowerCase() === 'aside';
+			if (!isNoteref && !isFootnoteTarget) return void view.goTo(href);
+
+			const text = this.extractFootnoteText(el);
+			if (!text) return void view.goTo(href);
+
+			// 卡片锚定引用处：取引用元素在宿主坐标的位置（iframe 内 rect → 宿主坐标）
+			let host = this.lastMouseHost;
+			try {
+				const rect = a?.getBoundingClientRect?.();
+				if (a?.ownerDocument && rect) host = this.toHostCoords(a.ownerDocument, rect.left, rect.bottom);
+			} catch { /* 忽略，退回鼠标位置 */ }
+			this.showFootnoteCard(text, href, host);
+		} catch {
+			this.foliateView?.goTo(href);
+		}
+	}
+
+	/** 提取脚注纯文本：按块级元素分段；剥掉回链小链接（↩ / 返回 / ↑ 等）避免噪声 */
+	private extractFootnoteText(el: Element): string {
+		const clone = el.cloneNode(true) as Element;
+		clone.querySelectorAll('a[href]').forEach((x) => {
+			const t = (x.textContent ?? '').trim();
+			// 仅剥回链符号（↩ ↑ ← 返回 等）；普通链接（哪怕短）保文字去壳，不丢内容
+			if (!t || /^[↩↑←⟲⌂🔙\s]+$/.test(t) || t === '返回') x.remove();
+			else x.replaceWith(...Array.from(x.childNodes));
+		});
+		const blocks = Array.from(clone.querySelectorAll('p, li, blockquote, dd, dt, h1, h2, h3, h4, h5, h6'));
+		const lines = blocks.length
+			? blocks.map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+			: [(clone.textContent ?? '').replace(/\s+/g, ' ').trim()];
+		return lines.filter(Boolean).join('\n');
+	}
+
+	/** 脚注卡片（微信读书式）：标题 + 可滚动内容 + 「查看脚注位置」跳转（长尾注兜底） */
+	private showFootnoteCard(text: string, href: string, host: { x: number; y: number }): void {
+		this.hideSelectionToolbar();
+		this.hideAnnPopup();
+		const pop = document.body.createDiv('fleur-epub-annview fleur-epub-fnview');
+		this.annPopup = pop;
+		pop.createDiv('fleur-epub-fnview-head').setText('脚注');
+		pop.createDiv('fleur-epub-fnview-body').setText(text);
+		const jump = pop.createEl('button', 'fleur-epub-fnview-jump');
+		jump.setText('查看脚注位置 ›');
+		jump.addEventListener('click', (ev) => {
+			ev.stopPropagation();
+			this.hideAnnPopup();
+			void this.foliateView?.goTo(href);
+		});
+		this.mountAnnPopupClose(pop);
+		this.placeAnnPopup(pop, host.x, host.y);
 	}
 
 	/** 全局关闭：点击卡片外部或按 Esc（同一时刻只显示一个弹窗） */

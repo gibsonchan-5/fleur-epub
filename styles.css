@@ -736,6 +736,49 @@
 	color: var(--text-muted);
 }
 
+/* ── 脚注卡片（微信读书式）：点脚注引用 → 就地弹内容卡，不跳转 ──
+   复用 annview 骨架（fixed / 限高滚动 / 主题底色），窄卡 + 标题行 + 正文 pre-line。 */
+.fleur-epub-fnview {
+	width: min(320px, calc(100vw - 24px));
+	max-height: min(46vh, 380px);
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding: 10px 16px 8px;
+	border-radius: 12px;
+	box-shadow: 0 10px 32px rgba(0, 0, 0, 0.16);
+	font-size: 14px;
+	line-height: 1.75;
+}
+.fleur-epub-fnview-head {
+	margin-bottom: 2px;
+	color: var(--text-muted);
+	font-size: 11.5px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+}
+.fleur-epub-fnview-body {
+	white-space: pre-line;
+	overflow-wrap: anywhere;
+}
+/* 长尾注兜底：跳转到脚注原文位置（弱化文字按钮，subtle 不抢内容） */
+.fleur-epub-fnview-jump {
+	display: block;
+	width: 100%;
+	margin: 6px -16px -8px;
+	padding: 8px 16px;
+	border: none;
+	border-top: 1px solid var(--background-modifier-border);
+	border-radius: 0 0 12px 12px;
+	background: transparent;
+	color: var(--text-muted);
+	font-size: 12.5px;
+	cursor: pointer;
+}
+.fleur-epub-fnview-jump:active {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
 /* ── 移动端点按标注：轻量批注卡（内容 + 编辑/删除图标工具栏） ──
    复用 annview 气泡骨架，重新设计呼吸感：更大内边距、更松行距、圆角与柔和投影；
    纯高亮/划线（无批注文字）→ 只给「清除」动作行（图标 + 文字），不展示原文。 */
