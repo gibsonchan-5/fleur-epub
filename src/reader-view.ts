@@ -2201,6 +2201,23 @@ export class EpubReaderView extends FileView {
 		};
 		// 纯序号形态：「(1)」「[2]」「*」「①」等——说明锚点落在词典 dt / 独立标记节点上
 		const isMarkerOnly = (t: string) => /^[(\[]?[0-9*†‡§①-⑳]{1,4}[)\].。]?$/.test(t.replace(/\s+/g, ''));
+		// 同一父级内、锚点之后直到下一个带 id 元素（下一条标记）之间的内容 = 本条正文
+		const collectTail = (node: Element): string => {
+			let out = '';
+			let n: Node | null = node.nextSibling;
+			while (n) {
+				if (n.nodeType === Node.ELEMENT_NODE) {
+					const e = n as Element;
+					if (e.hasAttribute('id') || e.hasAttribute('name')) break;
+					// 内联壳（span/sup 等）：剥回链符号后并入
+					out += (e.textContent ?? '').replace(/[↩↑←⟲⌂🔙]/g, '');
+				} else {
+					out += n.textContent ?? '';
+				}
+				n = n.nextSibling;
+			}
+			return out.replace(/\s+/g, ' ').trim();
+		};
 		// 序号分段：提取结果含多条脚注（无 id 平铺容器）时，按引用序号切出对应条目
 		const sliceByMarker = (full: string, want: number): string | null => {
 			const ms = Array.from(full.matchAll(/[(（\[]?(\d{1,3})[)）\].、．]/g));
@@ -2217,29 +2234,33 @@ export class EpubReaderView extends FileView {
 		};
 		let text = collect(el).trim();
 		if (text && isMarkerOnly(text)) {
-			// 正文在相邻节点（dd / 下一段 / 下一个 li）——向后找最多 3 个兄弟
+			// ① 本条正文是同一父级内、锚点之后的节点（p.fnote：<a id>(2)</a> 沈佺期诗：…）——
+			//    nextElementSibling 会跳过文本节点误取下一条，必须先沿 nextSibling 收集
+			const tail = collectTail(el);
+			if (tail && !isMarkerOnly(tail)) {
+				return `${text}\n${tail}`;
+			}
+			// ② 正文在相邻元素（dd / 下一段 / 下一个 li）——向后找最多 3 个兄弟
 			let sib = el.nextElementSibling;
 			for (let i = 0; sib && i < 3; i++) {
 				const t = collect(sib).trim();
 				if (t && !isMarkerOnly(t)) {
 					text = `${text}\n${t}`;
-					break;
+					return text;
 				}
 				sib = sib.nextElementSibling;
 			}
-			// 兜底：el 是包裹层的子标记（如 <li><sup id>…</sup></li>），从父层的下一个兄弟找
-			if (isMarkerOnly(text)) {
-				const parent = el.parentElement;
-				if (parent && parent !== el.ownerDocument?.body) {
-					let psib = parent.nextElementSibling;
-					for (let i = 0; psib && i < 3; i++) {
-						const t = collect(psib).trim();
-						if (t && !isMarkerOnly(t)) {
-							text = `${text}\n${t}`;
-							break;
-						}
-						psib = psib.nextElementSibling;
+			// ③ 兜底：el 是包裹层的子标记（如 <li><sup id>…</sup></li>），从父层的下一个兄弟找
+			const parent = el.parentElement;
+			if (parent && parent !== el.ownerDocument?.body) {
+				let psib = parent.nextElementSibling;
+				for (let i = 0; psib && i < 3; i++) {
+					const t = collect(psib).trim();
+					if (t && !isMarkerOnly(t)) {
+						text = `${text}\n${t}`;
+						return text;
 					}
+					psib = psib.nextElementSibling;
 				}
 			}
 		}
