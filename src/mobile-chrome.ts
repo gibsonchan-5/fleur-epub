@@ -109,7 +109,7 @@ export class MobileChrome {
 				this.openThemeSheet();
 				break;
 			case 'type': {
-				// 排版 = 原「设置」入口的 Aa 外观面板（字号/行距/段距/页边距/字体/背景）
+				// 排版 = 原「设置」入口的 Aa 外观面板（字号/行距/段距/上下边距/左右边距/字体；背景在工具栏「背景」键）
 				const anchor = this.itemBtns.get('type');
 				if (anchor) this.view.openAppearancePanelFrom(anchor);
 				break;

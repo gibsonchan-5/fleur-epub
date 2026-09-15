@@ -22,12 +22,16 @@ export interface FleurEpubSettings {
 	// ── 阅读外观（顶栏 Aa 面板，微信读书式） ──
 	/** 背景主题 */
 	theme: ReaderTheme;
-	/** 页边距（px，foliate renderer margin 属性，滚动/翻页通用） */
+	/** 页边距基准（px，foliate renderer margin 属性；项已在 Aa 面板拆为上下边距，此项保留作内部基准值） */
 	pageMargin: number;
 	/** 左边距（px，在对称页边距基础上的额外偏移；与右边距独立） */
 	marginLeft: number;
 	/** 右边距（px，在对称页边距基础上的额外偏移；与左边距独立） */
 	marginRight: number;
+	/** 上边距（px）：渲染器顶部内边距，正文上方留白（与下边距独立） */
+	marginTop: number;
+	/** 下边距（px）：渲染器底部内边距，正文下方留白（与上边距独立） */
+	marginBottom: number;
 	/** 行距（行高倍数） */
 	lineHeight: number;
 	/** 段间距（em） */
@@ -94,6 +98,8 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	pageMargin: 36,
 	marginLeft: 0,
 	marginRight: 0,
+	marginTop: 0,
+	marginBottom: 0,
 	lineHeight: 1.9,
 	paraSpacing: 0.85,
 	paraIndent: true,
@@ -181,7 +187,7 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('背景主题')
-			.setDesc('阅读背景与配套文字配色（阅读页顶栏「Aa」面板可随时调整字号/行距/段距/页边距/字体）')
+			.setDesc('阅读背景与配套文字配色（阅读页顶栏「Aa」面板可随时调整字号/行距/段距/上下边距/左右边距/字体）')
 			.addDropdown((drop) =>
 				drop
 					.addOption('light', '浅色')

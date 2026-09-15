@@ -988,7 +988,7 @@ export class EpubReaderView extends FileView {
 		this.contentEl.setAttribute('data-reader-theme', this.plugin.settings.theme);
 		const renderer = this.foliateView?.renderer;
 		if (renderer?.setStyles) renderer.setStyles(this.buildTypographyCss());
-		// 页边距：foliate observed attribute（滚动/翻页两种 flow 均生效，设置即重排）
+		// 页边距基准：foliate observed attribute（滚动/翻页两种 flow 均生效，设置即重排）
 		if (renderer) {
 			renderer.setAttribute('margin', `${this.plugin.settings.pageMargin}px`);
 			// 左右边距（独立调节）：在对称页边距基础上给 renderer 加额外 padding。
@@ -996,6 +996,11 @@ export class EpubReaderView extends FileView {
 			// 不侵入 foliate 分栏/翻页数学，滚动与翻页两种 flow 均适用。
 			renderer.style.paddingLeft = `${this.plugin.settings.marginLeft ?? 0}px`;
 			renderer.style.paddingRight = `${this.plugin.settings.marginRight ?? 0}px`;
+			// 上下边距：同理加在渲染器内边距上。paginator 的宿主是 border-box +
+			// overflow:hidden，上下内边距会直接压缩内容区高度（翻页时该页行数变少），
+			// 滚动模式下则是上下各留出一条不随内容滚动的白边。
+			renderer.style.paddingTop = `${this.plugin.settings.marginTop ?? 0}px`;
+			renderer.style.paddingBottom = `${this.plugin.settings.marginBottom ?? 0}px`;
 		}
 	}
 
@@ -1674,7 +1679,7 @@ export class EpubReaderView extends FileView {
 		this.currentSelDoc = null;
 	}
 
-	// ── 阅读外观面板（Aa）：主题 / 字体 / 字号 / 行距 / 段距 / 页边距 ──
+	// ── 阅读外观面板（Aa）：主题 / 字体 / 字号 / 行距 / 段距 / 上下边距 / 左右边距 ──
 
 	private appearPanel: HTMLElement | null = null;
 	private appearPanelClose: (() => void) | null = null;
@@ -1862,7 +1867,7 @@ export class EpubReaderView extends FileView {
 		}
 		renderIndent();
 
-		// ── 行距 / 段距 / 页边距：滑杆 + 数值 ──
+		// ── 行距 / 段距 / 上下边距 / 左右边距：滑杆 + 数值 ──
 		const mkSlider = (
 			label: string, min: number, max: number, step: number,
 			get: () => number, set: (v: number) => void, fmt: (v: number) => string,
@@ -1885,7 +1890,9 @@ export class EpubReaderView extends FileView {
 		};
 		mkSlider('行距', 1.4, 2.6, 0.05, () => s.lineHeight, (v) => (s.lineHeight = v), (v) => v.toFixed(2));
 		mkSlider('段距', 0, 2, 0.05, () => s.paraSpacing, (v) => (s.paraSpacing = v), (v) => `${v.toFixed(2)}em`);
-		mkSlider('页边距', 0, 80, 4, () => s.pageMargin, (v) => (s.pageMargin = v), (v) => `${v}px`);
+		// 上下边距：分别可调（原「页边距」是对称项，用户要求拆成上下两项）
+		mkSlider('上边距', 0, 120, 4, () => s.marginTop ?? 0, (v) => (s.marginTop = v), (v) => `${v}px`);
+		mkSlider('下边距', 0, 120, 4, () => s.marginBottom ?? 0, (v) => (s.marginBottom = v), (v) => `${v}px`);
 		// 左右边距：独立于对称页边距的额外偏移，可做不对称排版（如左 70 / 右 40）
 		mkSlider('左边距', 0, 80, 4, () => s.marginLeft ?? 0, (v) => (s.marginLeft = v), (v) => `${v}px`);
 		mkSlider('右边距', 0, 80, 4, () => s.marginRight ?? 0, (v) => (s.marginRight = v), (v) => `${v}px`);
@@ -1903,6 +1910,8 @@ export class EpubReaderView extends FileView {
 			s.pageMargin = 36;
 			s.marginLeft = 0;
 			s.marginRight = 0;
+			s.marginTop = 0;
+			s.marginBottom = 0;
 			s.fontFamily = '';
 			s.fontWeight = 400;
 			s.paraIndent = true;
