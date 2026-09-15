@@ -5,14 +5,19 @@
 //   - 翻页模式：右击下一页、左击上一页（点按区域，不干扰选段），支持方向键
 // 继承 FileView：registerExtensions 接管 .epub 后，Obsidian 打开文件时回调 onLoadFile。
 
-import { FileView, Menu, Notice, TFile, WorkspaceLeaf } from 'obsidian';
+import { FileView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { computeFingerprint, type BookData, type BookMeta, type EpubAnnotation, type AnnotationKind } from './store';
 import { Overlayer } from '../vendor/foliate-js/overlayer.js';
 import { AIChatPanel } from './ai-chat-modal';
+import { exportAnnotationsToNote } from './annotation-export';
 import { cleanAnnotationText } from './text-utils';
 import { TranslationEngine, findParagraphEl, collectParagraphs } from './translator';
 import type { ReaderTheme } from './settings';
+import { isMobileUI } from './platform';
+import { MobileChrome } from './mobile-chrome';
+import { ReaderTTS } from './tts';
+import { TTSPlayerModal } from './tts-player';
 import '../vendor/foliate-js/view.js';
 
 export const VIEW_TYPE_EPUB = 'fleur-epub-view';
@@ -84,6 +89,71 @@ const PRESET_FONTS: Array<{ label: string; stack: string }> = [
 /** 本机字体扫描结果缓存（本次会话内有效） */
 let scannedFonts: string[] = [];
 
+/**
+ * 在元素内定位一段（空白归一化后的）文本，返回覆盖它的文本节点区间。
+ * TTS 跟读高亮用：句子文本来自 innerText 归一化，需映射回真实 DOM 节点
+ * （跨 <em>/<strong> 等内联元素的句子也能整体覆盖）。
+ */
+function findTextInElement(
+	el: HTMLElement,
+	text: string,
+): Array<{ node: Text; start: number; end: number }> {
+	const ownerDoc = el.ownerDocument;
+	if (!ownerDoc) return [];
+	const target = text.replace(/\s+/g, ' ').trim();
+	if (!target) return [];
+
+	const tw = ownerDoc.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+		acceptNode: (n) => {
+			const tag = n.parentElement?.tagName;
+			return tag === 'SCRIPT' || tag === 'STYLE'
+				? NodeFilter.FILTER_REJECT
+				: NodeFilter.FILTER_ACCEPT;
+		},
+	});
+	const nodes: Text[] = [];
+	let n = tw.nextNode() as Text | null;
+	while (n) {
+		nodes.push(n);
+		n = tw.nextNode() as Text | null;
+	}
+	if (!nodes.length) return [];
+
+	// 拼接原文并建立「归一化索引 → (节点, 原始偏移)」映射：
+	// 连续空白折叠为一个空格，只映射到该空白段的第一个字符
+	let seq = '';
+	const idxMap: Array<{ node: Text; off: number }> = [];
+	for (const node of nodes) {
+		const data = node.data;
+		for (let i = 0; i < data.length; i++) {
+			if (/\s/.test(data[i])) {
+				if (seq.length && seq[seq.length - 1] !== ' ') {
+					seq += ' ';
+					idxMap.push({ node, off: i });
+				}
+				while (i + 1 < data.length && /\s/.test(data[i + 1])) i++;
+			} else {
+				seq += data[i];
+				idxMap.push({ node, off: i });
+			}
+		}
+	}
+	const start = seq.indexOf(target);
+	if (start < 0) return [];
+	const end = start + target.length;
+
+	// 逐归一化字符回溯来源坐标，同节点相邻区间合并
+	const ranges: Array<{ node: Text; start: number; end: number }> = [];
+	for (let i = start; i < end; i++) {
+		const m = idxMap[i];
+		if (!m) continue;
+		const last = ranges[ranges.length - 1];
+		if (last && last.node === m.node && last.end === m.off) last.end = m.off + 1;
+		else ranges.push({ node: m.node, start: m.off, end: m.off + 1 });
+	}
+	return ranges;
+}
+
 export class EpubReaderView extends FileView {
 	private foliateView: any = null;
 	private bookData: BookData | null = null;
@@ -99,6 +169,12 @@ export class EpubReaderView extends FileView {
 	private loadedPath: string | null = null;
 	// ── 标注引擎状态 ──
 	private lastMouseHost = { x: 0, y: 0 };
+	/** 移动端选区稳定判定定时器（selectionchange 防抖） */
+	private selChangeTimer: number | null = null;
+	/** 选段工具条最近一次弹出时间：collapse 事件的宽限期判定用 */
+	private selBarShownAt = 0;
+	/** 侧边栏「定位标注」进行中：移动端抑制 show-annotation 弹 action sheet */
+	private locating = false;
 	private selToolbar: HTMLElement | null = null;
 	private annPopup: HTMLElement | null = null;
 	/** 批注卡片的全局关闭监听清理函数（外点 / Esc） */
@@ -108,8 +184,19 @@ export class EpubReaderView extends FileView {
 	// ── 段落对照翻译 ──
 	private translator: TranslationEngine | null = null;
 	private translateBtn: HTMLElement | null = null;
+	// ── 移动端 chrome（底部工具栏 + 显隐状态机；桌面端为 null）──
+	private chrome: MobileChrome | null = null;
+	/** 移动端「听」（Web Speech API 朗读；桌面端为 null） */
+	private tts: ReaderTTS | null = null;
+	private ttsBtn: HTMLElement | null = null;
+	/** TTS 跟读高亮的 span 列表（朗读推进/停止时恢复原状） */
+	private ttsHighlightSpans: HTMLSpanElement[] = [];
+	/** TTS 状态订阅取消函数（onClose 时解绑） */
+	private ttsUnsub: (() => void) | null = null;
+	/** 桌面端听书播放器 Modal（关闭仅收起面板，朗读继续） */
+	private ttsModal: TTSPlayerModal | null = null;
 
-	constructor(leaf: WorkspaceLeaf, private plugin: FleurEpubPlugin) {
+	constructor(leaf: WorkspaceLeaf, public plugin: FleurEpubPlugin) {
 		super(leaf);
 	}
 
@@ -129,6 +216,17 @@ export class EpubReaderView extends FileView {
 
 		// 顶栏：书名 · 居中；右侧：模式切换 + 进度
 		const bar = createDiv('fleur-epub-bar');
+		// 移动端：顶栏左侧「返回书架」（微信读书式 chevron）；桌面不渲染
+		if (isMobileUI(this.plugin)) {
+			const backBtn = createSpan('fleur-epub-bar-btn fleur-epub-bar-back');
+			setIcon(backBtn, 'chevron-left');
+			backBtn.setAttribute('aria-label', '返回书架');
+			backBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				void this.plugin.openShelf();
+			});
+			bar.appendChild(backBtn);
+		}
 		this.titleEl = createSpan('fleur-epub-title');
 		const right = createDiv('fleur-epub-bar-right');
 
@@ -154,17 +252,49 @@ export class EpubReaderView extends FileView {
 		});
 		this.translateBtn = trBtn;
 
-		// Aa 阅读外观按钮（微信读书式：字号/行距/段距/页边距/背景主题/字体）
-		const aaBtn = createSpan('fleur-epub-bar-btn');
-		aaBtn.setText('Aa');
-		aaBtn.setAttribute('aria-label', '阅读外观');
-		aaBtn.addEventListener('click', (e) => {
-			e.stopPropagation();
-			this.toggleAppearancePanel(aaBtn);
-		});
+		// 顶栏「听」（移动端 + 桌面对齐）：微信读书式听书，Web Speech API
+		if (ReaderTTS.supported()) {
+			this.tts = new ReaderTTS(this);
+			// 播放状态 → 顶栏「听」点亮/熄灭（暂停时半亮，由 CSS 处理）
+			this.ttsUnsub = this.tts.onStateChange((s) => {
+				this.ttsBtn?.toggleClass('is-active', s.active && !s.paused);
+				this.ttsBtn?.toggleClass('is-paused', s.active && s.paused);
+			});
+			const ttsBtn = createSpan('fleur-epub-bar-btn fleur-epub-bar-btn-tts');
+			ttsBtn.setText('听');
+			ttsBtn.setAttribute('aria-label', '听书播放器');
+			ttsBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				if (this.chrome) {
+					// 移动端：bottom sheet 播放器
+					this.chrome.openTTSPlayer();
+				} else {
+					// 桌面端：居中 Modal 播放器（关闭仅收起，朗读继续）
+					const tts = this.tts;
+					if (!tts) return;
+					if (!tts.isActive()) tts.start();
+					this.ttsModal?.close();
+					this.ttsModal = new TTSPlayerModal(this.app, this);
+					this.ttsModal.open();
+				}
+			});
+			this.ttsBtn = ttsBtn;
+		}
+
+		// Aa 阅读外观按钮：仅桌面顶栏保留（移动端入口在底部工具栏「排版」，避免重复）
+		if (!isMobileUI(this.plugin)) {
+			const aaBtn = createSpan('fleur-epub-bar-btn');
+			aaBtn.setText('Aa');
+			aaBtn.setAttribute('aria-label', '阅读外观');
+			aaBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				this.toggleAppearancePanel(aaBtn);
+			});
+			right.appendChild(aaBtn);
+		}
 
 		right.appendChild(trBtn);
-		right.appendChild(aaBtn);
+		if (this.ttsBtn) right.appendChild(this.ttsBtn);
 		right.appendChild(seg);
 		right.appendChild(this.percentEl);
 		bar.appendChild(this.titleEl);
@@ -188,6 +318,14 @@ export class EpubReaderView extends FileView {
 			(e: WheelEvent) => this.onReaderWheel(e),
 			{ passive: false },
 		);
+
+		// 移动端：创建底部工具栏并让 chrome 初始隐藏（沉浸开局，中央点按呼出）。
+		// 桌面端不实例化，此后的所有移动分支均以 this.chrome 是否存在为判断。
+		if (isMobileUI(this.plugin)) {
+			this.chrome = new MobileChrome(this);
+			this.contentEl.appendChild(this.chrome.toolbarEl);
+			this.contentEl.addClass('is-chrome-hidden');
+		}
 	}
 
 	/** Obsidian 打开 .epub 文件时的入口 */
@@ -230,6 +368,9 @@ export class EpubReaderView extends FileView {
 			//（foliate 只在 overlayer 上持有当前章节的标注，翻章即失效，需每次重挂；
 			//  addAnnotation 内部解析 CFI，非当前章节自动跳过，全部重挂开销可忽略）
 			view.addEventListener('load', (e: CustomEvent) => {
+				// 翻章 = 阅读位置变了，停止朗读避免与画面脱节
+				this.tts?.stop();
+				this.ttsBtn?.removeClass('is-active');
 				const doc = e.detail?.doc as Document | undefined;
 				if (doc) {
 					this.bindDocEvents(doc);
@@ -264,22 +405,27 @@ export class EpubReaderView extends FileView {
 			view.addEventListener('show-annotation', (e: CustomEvent) => {
 				const { value, range } = e.detail ?? {};
 				const ann = this.bookData?.annotations.find((x) => x.cfi === value);
-				if (!ann?.comment) return;
-				let host = this.lastMouseHost;
-				const doc = range?.startContainer?.ownerDocument as Document | undefined;
-				if (doc && typeof range.getClientRects === 'function') {
-					const rects = (Array.from(range.getClientRects() as DOMRectList) as DOMRect[])
-						.filter((r) => r.width > 0 || r.height > 0);
-					const rect = rects[0];
-					if (rect) host = this.toHostCoords(doc, rect.left, rect.bottom);
+				// 移动端：点按标注 → action sheet（查看 / 编辑 / 清除），替代桌面右键清除菜单语义；
+				// 侧边栏「定位标注」触发的 show-annotation 只闪位置，不弹 sheet
+				if (isMobileUI(this.plugin)) {
+					if (ann && !this.locating) this.showAnnotationActionSheet(ann, this.annHostFromRange(range));
+					return;
 				}
-				this.showAnnotationViewer(ann, host.x, host.y);
+				if (!ann?.comment) return;
+				const dhost = this.annHostFromRange(range);
+				this.showAnnotationViewer(ann, dhost.x, dhost.y);
 			});
 
 			// 翻页 / 滚动时收起全部浮层，并按新视口重排翻译优先级（节流）
 			view.addEventListener('relocate', () => {
-				this.hideSelectionToolbar();
 				this.hideAnnPopup();
+				// 选区仍活动 → 保留选段工具条：选段本身可能触发布局微调型 relocate；
+				// 真翻页时选区塌缩，下轮 selectionchange 自然收起
+				const sel = this.currentSelDoc?.getSelection();
+				const selAlive = !!(sel && !sel.isCollapsed && sel.rangeCount > 0 && sel.toString().trim());
+				if (!selAlive) this.hideSelectionToolbar();
+				// 移动端：翻页 / 跳转后自动收起 chrome（sheet 打开时保持，供进度 slider 连续拖动）
+				this.chrome?.onRelocate();
 				this.translator?.scheduleFocus();
 			});
 
@@ -489,6 +635,135 @@ export class EpubReaderView extends FileView {
 		this.applyFlow();
 	}
 
+	/** 播放器/移动端交互取用 TTS 实例 */
+	getTTS(): ReaderTTS | null {
+		return this.tts;
+	}
+
+	/** TTS 素材：当前章节按块级元素切段（段落边界即自然停顿）+ 文档语言；无内容返回 null */
+	/** 当前章节语言（声源列表排序用，轻量不扫正文） */
+	getTTSChapterLang(): string {
+		const view = this.foliateView;
+		const renderer = view?.renderer;
+		const contents: Array<{ doc: Document; index: number }> = renderer?.getContents?.() ?? [];
+		const doc = contents[0]?.doc;
+		return (
+			doc?.documentElement?.getAttribute('lang') ||
+			String((view?.book?.metadata as any)?.language ?? '')
+		);
+	}
+
+	/** TTS 朗读单元：句子文本 + 所在段落元素（用于跟读高亮定位） */
+	getTTSChapter(): { items: Array<{ el: HTMLElement; text: string }>; lang: string } | null {
+		const view = this.foliateView;
+		const renderer = view?.renderer;
+		const contents: Array<{ doc: Document; index: number }> = renderer?.getContents?.() ?? [];
+		if (!contents.length) return null;
+		const cur = typeof renderer?.index === 'number' ? renderer.index : contents[0].index;
+		const entry = contents.find((c) => c.index === cur) ?? contents[0];
+		const doc = entry.doc;
+		const lang =
+			doc.documentElement?.getAttribute('lang') ||
+			String((view?.book?.metadata as any)?.language ?? '');
+		const blocks = Array.from(
+			doc.body?.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, dd, dt') ?? [],
+		) as HTMLElement[];
+		const items: Array<{ el: HTMLElement; text: string }> = [];
+		for (const el of blocks) {
+			const t = el.innerText?.replace(/\s+/g, ' ').trim();
+			if (!t) continue;
+			// 句级切分：按中英句读断句，跟读高亮粒度与微信读书对齐
+			const parts = t
+				.split(/(?<=[。！？!?…]["」』”’)]?)/)
+				.map((s) => s.trim())
+				.filter(Boolean);
+			for (const s of parts) {
+				// 过短碎片（如引号残留）并入前一句，避免朗读碎片化
+				if (items.length && s.length < 2) {
+					items[items.length - 1].text += s;
+				} else {
+					items.push({ el, text: s });
+				}
+			}
+		}
+		return items.length ? { items, lang } : null;
+	}
+
+	/** TTS 跟读：清除上一句高亮，在段落原文中定位本句并加灰底高亮 */
+	highlightTTSSentence(el: HTMLElement, text: string): void {
+		try {
+			const doc = el.ownerDocument;
+			if (!doc) return;
+			this.clearTTSHighlight();
+			// 首次注入高亮样式到 iframe 文档（每次章节加载是新 doc，幂等）
+			if (!doc.getElementById('fleur-epub-tts-style')) {
+				const style = doc.createElement('style');
+				style.id = 'fleur-epub-tts-style';
+				style.textContent =
+					'.fleur-epub-tts-hl{background:rgba(127,127,127,.28);border-radius:2px;'+
+					'-webkit-box-decoration-break:clone;box-decoration-break:clone;}';
+				(doc.head ?? doc.documentElement).appendChild(style);
+			}
+			const ranges = findTextInElement(el, text);
+			// 从后往前包裹，避免 splitText 使先前捕获的引用失效
+			for (let i = ranges.length - 1; i >= 0; i--) {
+				const { node, start, end } = ranges[i];
+				if (end <= start) continue;
+				let target = node;
+				if (end < target.length) target.splitText(end);
+				if (start > 0) target = target.splitText(start);
+				const span = doc.createElement('span');
+				span.className = 'fleur-epub-tts-hl';
+				target.parentNode?.insertBefore(span, target);
+				span.appendChild(target);
+				this.ttsHighlightSpans.push(span);
+			}
+			// 跟读翻页：滚动模式平滑滚动居中；翻页模式目标句不在当前页时自动翻页
+			const span = this.ttsHighlightSpans[0];
+			if (!span) return;
+			if (this.plugin.settings.flow !== 'paginated') {
+				span.scrollIntoView({ block: 'center', behavior: 'smooth' });
+			} else {
+				const renderer = this.foliateView?.renderer as any;
+				if (renderer?.scrollToAnchor) {
+					// 分页模式：iframe 视口横跨全部列（翻页靠外层容器横向滚动），
+					// client rects 相对 iframe 视口，无法用视口判可见性；
+					// 直接交给 foliate scrollToAnchor：同页时 scrollLeft 未变 = 无操作，跨页 = 翻页
+					void renderer.scrollToAnchor(span);
+				} else {
+					span.scrollIntoView({ block: 'center', behavior: 'smooth' });
+				}
+			}
+		} catch {
+			/* 高亮是锦上添花，任何异常都不打断朗读 */
+		}
+	}
+
+	/** 清除全部 TTS 跟读高亮（恢复为普通文本节点） */
+	clearTTSHighlight(): void {
+		for (const span of this.ttsHighlightSpans) {
+			const parent = span.parentNode;
+			if (!parent) continue;
+			parent.insertBefore(span.ownerDocument.createTextNode(span.textContent ?? ''), span);
+			span.remove();
+			parent.normalize();
+		}
+		this.ttsHighlightSpans = [];
+	}
+
+	/** 移动端背景 sheet：当前主题 key */
+	getReaderTheme(): string {
+		return this.plugin.settings.theme;
+	}
+
+	/** 移动端背景 sheet：切换主题（持久化 + 重应用样式；Aa 面板下次打开同步） */
+	async setReaderTheme(theme: ReaderTheme): Promise<void> {
+		if (this.plugin.settings.theme === theme) return;
+		this.plugin.settings.theme = theme;
+		await this.plugin.saveSettings();
+		this.applyReaderStyles();
+	}
+
 	/** 排版样式：注入章节文档（foliate 在每次章节加载后自动重注入 setStyles） */
 	applyReaderStyles(): void {
 		// 宿主侧顶栏 / 阅读区底色随主题联动
@@ -628,11 +903,21 @@ export class EpubReaderView extends FileView {
 			if (this.appearPanel) this.closeAppearancePanel();
 		}, true);
 		doc.addEventListener('click', (e: MouseEvent) => {
+			// 移动端点按路由：中央呼出 chrome、左右分区翻页（滚动模式点按即呼出）
+			if (this.chrome) {
+				this.handleMobileTap(doc, e);
+				return;
+			}
 			// 点击命中已有标注 → 交给 foliate 的 show-annotation 弹批注卡片，不翻页
 			const entry = (this.foliateView?.renderer?.getContents?.() ?? []).find((c: any) => c.doc === doc);
 			if (entry?.overlayer) {
 				const [hit] = entry.overlayer.hitTest({ x: e.clientX, y: e.clientY });
 				if (hit) return;
+			}
+			// 听书中点按当前句（灰底高亮）→ 暂停；暂停中再点 → 续播（与移动端对齐）
+			if (this.tts?.isActive() && (e.target as HTMLElement).closest?.('.fleur-epub-tts-hl')) {
+				this.tts.toggle();
+				return;
 			}
 			// 点击空白处收起浮层
 			this.hideSelectionToolbar();
@@ -644,24 +929,7 @@ export class EpubReaderView extends FileView {
 			// 有选段时不翻页（避免破坏用户复制意图）
 			const sel = doc.getSelection();
 			if (sel && !sel.isCollapsed) return;
-			// 关键：翻页模式下 foliate 直接平移 iframe（容器 scrollLeft 恒 0），
-			// 点击的 clientX 是内容坐标，须换算回可视窗口内的相对位置：
-			// 用 iframe 元素（同源可取 frameElement）在宿主中的盒子反推可视区间。
-			let rel = 0.5;
-			const fe = doc.defaultView?.frameElement as HTMLElement | null;
-			const hostBox = this.readerEl.getBoundingClientRect();
-			const feBox = fe?.getBoundingClientRect();
-			if (feBox && feBox.width > 0) {
-				const visStart = Math.max(0, hostBox.left - feBox.left);
-				const visEnd = Math.min(feBox.width, hostBox.right - feBox.left);
-				if (visEnd > visStart) rel = (e.clientX - visStart) / (visEnd - visStart);
-			} else {
-				// 兜底：renderer 记账坐标（start = 可视窗末的内容坐标、size = 可视宽）
-				const r = this.foliateView?.renderer;
-				const size = typeof r?.size === 'number' ? r.size : 0;
-				const start = typeof r?.start === 'number' ? r.start : 0;
-				if (size > 0) rel = (e.clientX - start) / size + 1;
-			}
+			const rel = this.tapRelX(doc, e.clientX);
 			if (rel > 1 - ZONE_RATIO) void this.foliateView?.next();
 			else if (rel < ZONE_RATIO) void this.foliateView?.prev();
 		});
@@ -676,13 +944,36 @@ export class EpubReaderView extends FileView {
 		doc.addEventListener('keydown', (e: KeyboardEvent) => this.handleKey(e));
 
 		// 选段结束 → 弹出选择工具条（mouseup 后选区才稳定）
-		doc.addEventListener('mouseup', (e: MouseEvent) => {
-			this.lastMouseHost = this.toHostCoords(doc, e.clientX, e.clientY);
-			window.setTimeout(() => {
-				const sel = doc.getSelection();
-				if (sel && !sel.isCollapsed && sel.rangeCount > 0) this.showSelectionToolbar(doc);
-			}, 10);
-		});
+		// 移动分支改走 selectionchange：触摸选段没有 mouseup 语义，靠「选区 300ms 不再变化」判定稳定
+		if (!isMobileUI(this.plugin)) {
+			doc.addEventListener('mouseup', (e: MouseEvent) => {
+				this.lastMouseHost = this.toHostCoords(doc, e.clientX, e.clientY);
+				window.setTimeout(() => {
+					const sel = doc.getSelection();
+					if (sel && !sel.isCollapsed && sel.rangeCount > 0) this.showSelectionToolbar(doc);
+				}, 10);
+			});
+		} else {
+			doc.addEventListener('selectionchange', () => {
+				if (this.selChangeTimer) window.clearTimeout(this.selChangeTimer);
+				this.selChangeTimer = window.setTimeout(() => {
+					this.selChangeTimer = null;
+					// 章节已切换 / 文档已脱离 → 丢弃（旧 doc 的选区不再有意义）
+					if (!doc.isConnected) return;
+					const sel = doc.getSelection();
+					if (sel && !sel.isCollapsed && sel.rangeCount > 0 && sel.toString().trim()) {
+						this.showSelectionToolbar(doc, [], true);
+					} else if (
+						this.selToolbar && this.currentSelDoc === doc
+						// 宽限期：刚弹出（<350ms）就到的 collapse 视为选段收尾竞态，忽略
+						&& Date.now() - this.selBarShownAt > 350
+					) {
+						// 选区消失（点击空白收起手柄）→ 收起工具条
+						this.hideSelectionToolbar();
+					}
+				}, 300);
+			});
+		}
 
 		// 右键：有选段 → 工具条（命中标注则附加擦除项）；无选段命中标注 → 弹「清除」菜单（不直接擦除）；否则走浏览器默认菜单
 		doc.addEventListener('contextmenu', (e: MouseEvent) => {
@@ -703,6 +994,86 @@ export class EpubReaderView extends FileView {
 				this.showClearAnnotationMenu(host.x, host.y, [hitAnn]);
 			}
 		});
+
+		// 移动端滚动模式：内容滚动即收起 chrome（微信读书行为；sheet 打开时不收）
+		if (this.chrome) {
+			doc.addEventListener('scroll', () => this.chrome?.onContentScroll(), { passive: true });
+		}
+	}
+
+	/**
+	 * 点击位置在可视窗内的相对横向比例（0~1）。
+	 * 翻页模式下 foliate 直接平移 iframe（容器 scrollLeft 恒 0），点击的 clientX 是
+	 * 内容坐标，须换算回可视窗口内的相对位置：用 iframe 元素（同源可取 frameElement）
+	 * 在宿主中的盒子反推可视区间。桌面点按翻页与移动端分区点按共用。
+	 */
+	private tapRelX(doc: Document, clientX: number): number {
+		let rel = 0.5;
+		const fe = doc.defaultView?.frameElement as HTMLElement | null;
+		const hostBox = this.readerEl.getBoundingClientRect();
+		const feBox = fe?.getBoundingClientRect();
+		if (feBox && feBox.width > 0) {
+			const visStart = Math.max(0, hostBox.left - feBox.left);
+			const visEnd = Math.min(feBox.width, hostBox.right - feBox.left);
+			if (visEnd > visStart) rel = (clientX - visStart) / (visEnd - visStart);
+		} else {
+			// 兜底：renderer 记账坐标（start = 可视窗末的内容坐标、size = 可视宽）
+			const r = this.foliateView?.renderer;
+			const size = typeof r?.size === 'number' ? r.size : 0;
+			const start = typeof r?.start === 'number' ? r.start : 0;
+			if (size > 0) rel = (clientX - start) / size + 1;
+		}
+		return rel;
+	}
+
+	/**
+	 * 移动端点按路由（与桌面 click 处理互斥，chrome 存在即移动分支）：
+	 * 命中标注 → 放行给 foliate；中央 24% 呼出/收起 chrome；左右 38% 翻页；
+	 * 滚动模式点按任意空白处即呼出。翻页后 chrome 自动收起（微信读书行为）。
+	 */
+	private handleMobileTap(doc: Document, e: MouseEvent): void {
+		const entry = (this.foliateView?.renderer?.getContents?.() ?? []).find((c: any) => c.doc === doc);
+		if (entry?.overlayer) {
+			const [hit] = entry.overlayer.hitTest({ x: e.clientX, y: e.clientY });
+			// 命中已有标注 → foliate 自己派发 show-annotation，不干预
+			if (hit) return;
+		}
+		const target = e.target as HTMLElement;
+		// 交互元素放行：链接 / 按钮 / 可点击元素
+		if (target.closest('a, button, [role="button"], input, textarea, select, video, audio')) return;
+		// 朗读中点按当前句（灰底高亮）→ 暂停；暂停中再点 → 续播（微信读书式）
+		if (this.tts?.isActive() && target.closest('.fleur-epub-tts-hl')) {
+			this.tts.toggle();
+			return;
+		}
+		// 有选段时不干预、也不拆浮层：选段结束时浏览器会补发 click，若该 click 晚于
+		// 工具条弹出到达（触摸端 click 延迟尤其明显），「先拆再查选区」就会弹出即收。
+		// 顺序必须是：先查选区 → 后收浮层。
+		const sel = doc.getSelection();
+		if (sel && !sel.isCollapsed) return;
+		this.hideSelectionToolbar();
+		this.hideAnnPopup();
+		const chrome = this.chrome;
+		if (!chrome) return;
+		if (this.plugin.settings.flow !== 'paginated') {
+			chrome.toggle();
+			return;
+		}
+		const rel = this.tapRelX(doc, e.clientX);
+		if (rel > 1 - ZONE_RATIO) {
+			chrome.hide();
+			// 翻页 = 阅读位置变了，停止朗读避免与画面脱节
+			this.tts?.stop();
+			this.ttsBtn?.removeClass('is-active');
+			void this.foliateView?.next();
+		} else if (rel < ZONE_RATIO) {
+			chrome.hide();
+			this.tts?.stop();
+			this.ttsBtn?.removeClass('is-active');
+			void this.foliateView?.prev();
+		} else {
+			chrome.toggle();
+		}
 	}
 
 	/** 滚轮手势 → 翻页：小位移累积、过阈值触发、触发后冷却（防触摸板惯性连翻） */
@@ -858,7 +1229,7 @@ export class EpubReaderView extends FileView {
 
 	// ── 选择工具条：高亮五色 / 划线 / 波浪线 / 复制 / AI ──
 
-	private showSelectionToolbar(doc: Document, eraseTargets: EpubAnnotation[] = []): void {
+	private showSelectionToolbar(doc: Document, eraseTargets: EpubAnnotation[] = [], mobile = false): void {
 		const sel = doc.getSelection();
 		if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
 		const range0 = sel.getRangeAt(0);
@@ -870,6 +1241,12 @@ export class EpubReaderView extends FileView {
 		if (startEl?.closest('.fleur-translation')) return;
 		const text = sel.toString();
 		if (!text.trim()) return;
+		// 移动端：同一文档上工具条已在显示 → 不拆建（selectionchange 偶发连发时防闪烁），仅刷新快照
+		if (mobile && this.selToolbar && this.currentSelDoc === doc) {
+			this.selSnapshot = text;
+			return;
+		}
+		this.selBarShownAt = Date.now();
 		this.hideAnnPopup();
 		this.hideSelectionToolbar();
 		this.currentSelDoc = doc;
@@ -882,7 +1259,7 @@ export class EpubReaderView extends FileView {
 		const anchorRect = this.visibleAnchorRect(range);
 		const host = this.toHostCoords(doc, anchorRect.left, anchorRect.top);
 
-		const bar = document.body.createDiv('fleur-epub-selbar');
+		const bar = document.body.createDiv(mobile ? 'fleur-epub-mselbar' : 'fleur-epub-selbar');
 		this.selToolbar = bar;
 
 		const press = (el: HTMLElement) => el.addEventListener('mousedown', (e) => e.preventDefault());
@@ -919,9 +1296,13 @@ export class EpubReaderView extends FileView {
 			});
 		});
 		bar.createDiv('fleur-epub-selbar-sep');
-		mkBtn('⧉', '复制选段', () => {
-			void navigator.clipboard.writeText(this.selSnapshot).then(() => new Notice('已复制', 1500));
-		});
+		if (!mobile) {
+			// 桌面专属：复制选段。移动端按决策①不放复制——避开 iOS/Android 系统
+			// 选择菜单的冲突面，工具条只留系统菜单没有的能力（高亮/划线/AI/翻译）
+			mkBtn('⧉', '复制选段', () => {
+				void navigator.clipboard.writeText(this.selSnapshot).then(() => new Notice('已复制', 1500));
+			});
+		}
 		mkBtn('AI', 'AI 解释', () => {
 			new AIChatPanel(this.plugin, this.selSnapshot, 'explain').open(host.x, host.y);
 		});
@@ -937,6 +1318,34 @@ export class EpubReaderView extends FileView {
 			});
 		}
 
+		if (mobile) {
+			// 移动端：微信读书式——优先浮在选中文本正上方（带小箭头间距），
+			// 上方放不下换到选段下方；上下都放不下才回退底部固定（CSS 默认 bottom）。
+			window.requestAnimationFrame(() => {
+				const bw = bar.offsetWidth;
+				const bh = bar.offsetHeight;
+				const margin = 8;
+				let left = host.x + anchorRect.width / 2 - bw / 2;
+				left = Math.max(margin, Math.min(left, window.innerWidth - bw - margin));
+				const topAbove = host.y - bh - 10;
+				const topBelow = host.y + anchorRect.height + 10;
+				if (topAbove >= margin + 48) {
+					// 上方空间充足（避开顶栏 48px）
+					bar.setCssStyles({ left: `${left}px`, top: `${topAbove}px`, bottom: 'auto' });
+				} else if (topBelow + bh + margin <= window.innerHeight - 72) {
+					// 下方空间充足（避开底部工具栏 72px）
+					bar.setCssStyles({ left: `${left}px`, top: `${topBelow}px`, bottom: 'auto' });
+				} else {
+					// 上下都放不下（选段顶到边）→ 回退底部固定
+					bar.setCssStyles({
+						left: `${left}px`,
+						top: 'auto',
+						bottom: 'calc(72px + var(--fleur-epub-safe-bottom, 0px))',
+					});
+				}
+			});
+			return;
+		}
 		// 定位：可见选段上方居中；顶部放不下换到下方
 		window.requestAnimationFrame(() => {
 			const bw = bar.offsetWidth;
@@ -967,6 +1376,11 @@ export class EpubReaderView extends FileView {
 	}
 
 	private hideSelectionToolbar(): void {
+		// 移动端选区防抖定时器一并取消：翻页 / 收起后旧定时器不得复活工具条
+		if (this.selChangeTimer) {
+			window.clearTimeout(this.selChangeTimer);
+			this.selChangeTimer = null;
+		}
 		if (this.selToolbar) {
 			this.selToolbar.remove();
 			this.selToolbar = null;
@@ -987,6 +1401,8 @@ export class EpubReaderView extends FileView {
 		const s = this.plugin.settings;
 		const panel = document.body.createDiv('fleur-epub-appear');
 		this.appearPanel = panel;
+		// 移动端：bottom sheet 形态（纯 CSS 定位，见 styles.css 移动端段）
+		if (isMobileUI(this.plugin)) panel.addClass('fleur-epub-appear--sheet');
 
 		// 行构造器：左侧标签、右侧控件
 		const mkRow = (label: string) => {
@@ -999,12 +1415,14 @@ export class EpubReaderView extends FileView {
 			this.applyReaderStyles();
 		};
 
-		// ── 背景主题：四色圆形 swatch ──
+		// ── 背景主题：五色圆形 swatch（纯白 · 浅色 · 深色 · 暖黄 · 豆绿）──
 		const themeRow = mkRow('背景');
 		themeRow.addClass('is-themes');
 		for (const [key, t] of Object.entries(READER_THEMES)) {
 			const sw = themeRow.createDiv('fleur-epub-appear-swatch');
 			sw.setAttribute('aria-label', t.label);
+			// 记 key：重置时按 key 找 active swatch（不依赖位置索引）
+			sw.dataset.theme = key;
 			sw.setCssStyles({ background: t.bg });
 			if (s.theme === key) sw.addClass('is-active');
 			sw.addEventListener('click', () => {
@@ -1180,18 +1598,26 @@ export class EpubReaderView extends FileView {
 			fillFontOptions();
 			renderSize();
 			renderWeight();
-			panel.findAll('.fleur-epub-appear-swatch').forEach((d, i) => d.toggleClass('is-active', i === 0));
+			panel.findAll('.fleur-epub-appear-swatch').forEach((d) => d.toggleClass('is-active', d.dataset.theme === 'light'));
 			persist();
 		});
 
-		// 定位：锚点按钮下方右对齐
-		panel.setCssStyles({ visibility: 'hidden' });
-		window.requestAnimationFrame(() => {
-			const rect = anchor.getBoundingClientRect();
-			const bw = panel.offsetWidth;
-			const left = Math.max(8, Math.min(rect.right - bw, window.innerWidth - bw - 8));
-			panel.setCssStyles({ left: `${left}px`, top: `${rect.bottom + 8}px`, visibility: '' });
-		});
+		// 定位：移动端 = 底部 sheet（纯 CSS）；桌面 = 锚点下方右对齐（放不下改上方）
+		if (panel.hasClass('fleur-epub-appear--sheet')) {
+			panel.setCssStyles({ visibility: '' });
+		} else {
+			panel.setCssStyles({ visibility: 'hidden' });
+			window.requestAnimationFrame(() => {
+				const rect = anchor.getBoundingClientRect();
+				const bw = panel.offsetWidth;
+				const bh = panel.offsetHeight;
+				const left = Math.max(8, Math.min(rect.right - bw, window.innerWidth - bw - 8));
+				// 默认弹在锚点下方；下方放不下（移动端底部工具栏锚点、矮窗口）→ 改弹上方
+				let top = rect.bottom + 8;
+				if (top + bh > window.innerHeight - 8) top = Math.max(8, rect.top - bh - 8);
+				panel.setCssStyles({ left: `${left}px`, top: `${top}px`, visibility: '' });
+			});
+		}
 
 		// 外点 / Esc 关闭（面板内交互不关闭）
 		const outside = (e: MouseEvent) => {
@@ -1239,6 +1665,73 @@ export class EpubReaderView extends FileView {
 		if (ann.kind === 'underline') return '清除直线';
 		if (ann.kind === 'wavy') return '清除波浪线';
 		return ann.comment ? '清除高亮与批注' : '清除高亮';
+	}
+
+	/** 标注定位锚：优先用标注 range 的首个 rect（iframe 内容坐标 → 宿主坐标），兜底 lastMouseHost */
+	private annHostFromRange(range?: Range): { x: number; y: number } {
+		const doc = range?.startContainer?.ownerDocument as Document | undefined;
+		if (doc && typeof range?.getClientRects === 'function') {
+			const rects = (Array.from(range.getClientRects() as DOMRectList) as DOMRect[])
+				.filter((r) => r.width > 0 || r.height > 0);
+			const rect = rects[0];
+			if (rect) return this.toHostCoords(doc, rect.left, rect.bottom);
+		}
+		return this.lastMouseHost;
+	}
+
+	/**
+	 * 移动端点按标注 → 轻量批注卡：批注内容直接可见，下方小工具栏（编辑 / 删除）。
+	 * 删除 = 清除高亮与批注（合并原 action sheet 的「清除」语义，替代Obsidian Menu 弹窗）。
+	 */
+	private showAnnotationActionSheet(ann: EpubAnnotation, host: { x: number; y: number }): void {
+		this.hideSelectionToolbar();
+		this.hideAnnPopup();
+		const pop = document.body.createDiv('fleur-epub-annview fleur-epub-annquick');
+		this.annPopup = pop;
+
+		// 内容区：有批注显示批注文字（120 字截断 + 展开切换）；纯高亮/划线显示高亮原文
+		const comment = cleanAnnotationText(ann.comment ?? '');
+		const MAX_CHARS = 120;
+		const isLong = comment.length > MAX_CHARS;
+		let expanded = false;
+		const content = pop.createDiv('fleur-epub-annview-text');
+		if (comment) {
+			content.setText(isLong ? comment.slice(0, MAX_CHARS) + '...' : comment);
+			if (isLong) {
+				const hint = pop.createDiv('fleur-epub-annview-toggle');
+				hint.setText('展开全文 ›');
+				hint.addEventListener('click', (e) => {
+					e.stopPropagation();
+					expanded = !expanded;
+					content.setText(expanded ? comment : comment.slice(0, MAX_CHARS) + '...');
+					hint.setText(expanded ? '收起 ▲' : '展开全文 ›');
+				});
+			}
+		} else {
+			content.addClass('is-quote');
+			content.setText(ann.text || '高亮');
+		}
+
+		// 小工具栏：纯图标按钮（编辑 / 删除），不带文字
+		const bar = pop.createDiv('fleur-epub-annquick-bar');
+		const editBtn = bar.createDiv('fleur-epub-annquick-btn');
+		editBtn.setAttribute('aria-label', '编辑批注');
+		setIcon(editBtn.createSpan('fleur-epub-annquick-icon'), 'pencil');
+		editBtn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			this.showAnnotationEditor(ann, host.x, host.y);
+		});
+		const delBtn = bar.createDiv('fleur-epub-annquick-btn is-danger');
+		delBtn.setAttribute('aria-label', '删除批注');
+		setIcon(delBtn.createSpan('fleur-epub-annquick-icon'), 'trash-2');
+		delBtn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			this.hideAnnPopup();
+			void this.deleteAnnotation(ann);
+		});
+
+		this.mountAnnPopupClose(pop);
+		this.placeAnnPopup(pop, host.x, host.y);
 	}
 
 	// ── 批注弹窗（两个独立窗口，互不共享尺寸/位置）──
@@ -1459,6 +1952,38 @@ export class EpubReaderView extends FileView {
 
 	// ════════ 侧边栏联动 API（M3）：目录 / 定位 / 检索 ════════
 
+	/** 当前阅读进度百分比（移动端进度 sheet 用） */
+	getCurrentPercent(): number | null {
+		const p = this.bookData?.progress?.percent;
+		return typeof p === 'number' ? p : null;
+	}
+
+	/** 移动端工具栏 AI：自由问答面板（不依赖选段，与划词「AI 解释」互补） */
+	openAIAsk(): void {
+		new AIChatPanel(this.plugin, '', 'ask').open();
+	}
+
+	/** 导出当前书全部批注为 Markdown 笔记（移动端批注 sheet 入口；与桌面书架共用实现） */
+	exportAnnotations(): void {
+		void exportAnnotationsToNote(this.plugin, this);
+	}
+
+	/** 按全书比例跳转（移动端进度 slider 用，foliate goToFraction） */
+	async goToFraction(frac: number): Promise<void> {
+		const view = this.foliateView;
+		if (!view || typeof view.goToFraction !== 'function') return;
+		try {
+			await view.goToFraction(Math.max(0, Math.min(1, frac)));
+		} catch (err) {
+			console.warn('[FleurEPUB] 比例跳转失败', err);
+		}
+	}
+
+	/** 移动端底部工具栏「设置」入口：复用桌面 Aa 外观面板（定位自适应上/下方） */
+	openAppearancePanelFrom(anchor: HTMLElement): void {
+		this.toggleAppearancePanel(anchor);
+	}
+
 	/** 是否已加载书（侧边栏判断当前是否处于书模式） */
 	isBookLoaded(): boolean {
 		return !!this.foliateView && !!this.bookData;
@@ -1515,11 +2040,17 @@ export class EpubReaderView extends FileView {
 	/** 定位到标注：跳转、闪烁提示位置并弹批注卡片（foliate showAnnotation → show-annotation 事件） */
 	async locateAnnotation(cfi: string): Promise<void> {
 		try {
+			// 移动端：定位触发的 show-annotation 只闪位置，不弹 action sheet
+			this.locating = true;
 			await this.foliateView?.showAnnotation({ value: cfi });
 			const ann = this.bookData?.annotations.find((x) => x.cfi === cfi);
 			if (ann) this.flashAnnotation(ann);
 		} catch (err) {
 			console.warn('[FleurEPUB] 标注定位失败', err);
+		} finally {
+			window.setTimeout(() => {
+				this.locating = false;
+			}, 400);
 		}
 	}
 
@@ -1642,7 +2173,15 @@ export class EpubReaderView extends FileView {
 	}
 
 	async onClose(): Promise<void> {
+		this.ttsModal?.close();
+		this.ttsModal = null;
+		this.ttsUnsub?.();
+		this.ttsUnsub = null;
+		this.tts?.destroy();
+		this.tts = null;
 		await this.teardownBook();
+		this.chrome?.destroy();
+		this.chrome = null;
 		this.contentEl.empty();
 	}
 }

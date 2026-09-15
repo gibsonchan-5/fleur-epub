@@ -2,7 +2,7 @@
 // M1：骨架 + foliate-js 渲染 + 进度记忆
 
 import { Events, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
-import { BookStore } from './store';
+import { BookStore, computeFingerprint, type BookData } from './store';
 import { CoverCache } from './cover-cache';
 import { DEFAULT_SETTINGS, FleurEpubSettingTab, type FleurEpubSettings } from './settings';
 import { EpubReaderView, VIEW_TYPE_EPUB } from './reader-view';
@@ -15,6 +15,7 @@ import {
 	resolveBackend,
 	type SecretBackend,
 } from './secret-store';
+import { applyMobileBodyClass, isMobileUI } from './platform';
 
 export default class FleurEpubPlugin extends Plugin {
 	settings!: FleurEpubSettings;
@@ -50,6 +51,12 @@ export default class FleurEpubPlugin extends Plugin {
 		await this.loadSettings();
 		this.bookStore = new BookStore(this.app, this);
 		this.coverCache = new CoverCache(this.app, this);
+
+		// 移动端标记类：真机移动端 / 桌面调试开关时挂到 body，移动端样式全部限定在该作用域下
+		applyMobileBodyClass(this);
+
+		// 指纹迁移：旧版 identifier 撞号（z-lib 通用 UUID）修复后，按新算法重命名历史数据文件
+		await this.migrateBookFingerprints();
 
 		this.registerView(VIEW_TYPE_EPUB, (leaf: WorkspaceLeaf) =>
 			new EpubReaderView(leaf, this),
@@ -102,15 +109,52 @@ export default class FleurEpubPlugin extends Plugin {
 		this.addSettingTab(new FleurEpubSettingTab(this.app, this));
 	}
 
-	/** 打开右侧书架视图（复用已有 leaf） */
+	/**
+	 * 指纹迁移：v0.1.12 修复 identifier 撞号（不同书籍共用同一 UUID → 批注/进度跨书互串），
+	 * 数据文件名由旧指纹改为新指纹。按文件内记录的 book 元信息重算新指纹：
+	 * - 新旧一致 → 跳过（已迁移 / 无 identifier 书籍本就走 fallback，算法不变）
+	 * - 目标文件已存在 → 保留两者（不覆盖任何数据，交由人工核对）
+	 */
+	private async migrateBookFingerprints(): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const dir = `${this.app.vault.configDir}/plugins/fleur-epub/data`;
+		if (!(await adapter.exists(dir))) return;
+		const list = await adapter.list(dir);
+		for (const path of list.files) {
+			if (!path.endsWith('.json')) continue;
+			try {
+				const data = JSON.parse(await adapter.read(path)) as BookData;
+				const newFp = computeFingerprint(data.book);
+				if (!newFp || newFp === data.fingerprint) continue;
+				const target = `${dir}/${newFp}.json`;
+				if (await adapter.exists(target)) {
+					console.warn('[FleurEPUB] 指纹迁移：目标文件已存在，跳过', path, '→', target);
+					continue;
+				}
+				data.fingerprint = newFp;
+				await adapter.write(target, JSON.stringify(data, null, 2));
+				await adapter.remove(path);
+				console.log('[FleurEPUB] 指纹迁移完成', path, '→', target);
+			} catch (e) {
+				console.warn('[FleurEPUB] 指纹迁移失败', path, e);
+			}
+		}
+	}
+
+	/** 打开书架视图：桌面进右侧栏 leaf；移动端进主区 tab（Obsidian 移动端主区即全屏，避免右栏抽屉的挤压体验） */
 	async openShelf(): Promise<void> {
 		const { workspace } = this.app;
 		const leaves = workspace.getLeavesOfType(VIEW_TYPE_SHELF);
 		const leaf = leaves.length
 			? leaves[0]
-			: workspace.getRightLeaf(false);
+			: isMobileUI(this)
+				? workspace.getLeaf(true)
+				: workspace.getRightLeaf(false);
 		await leaf?.setViewState({ type: VIEW_TYPE_SHELF, state: {} });
 		if (leaf) await workspace.revealLeaf(leaf);
+		// 移动端：退出书 → 直接落在书架列表（书内面板功能已由底部工具栏承担）。
+		// 复用已有 shelf leaf 时 onOpen 不重跑，这里显式切换；新建视图则由 onOpen 的移动端分支兜底。
+		if (isMobileUI(this) && leaf?.view instanceof ShelfView) leaf.view.forceShelfMode();
 	}
 
 	/** 用阅读器视图打开 EPUB（优先复用已存在的 leaf） */
@@ -163,6 +207,8 @@ export default class FleurEpubPlugin extends Plugin {
 	async loadSettings(): Promise<void> {
 		const raw = (await this.loadData()) as Record<string, unknown> | null;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, raw ?? {});
+		// 纯白主题已下线（与浅色几乎无差异），旧配置自动回落浅色
+		if ((this.settings.theme as string) === 'white') this.settings.theme = 'light';
 		// 迁移旧版单自定义提示词（customPrompt: string）→ 三槽（customPrompts: string[]）
 		const legacy = (this.settings as unknown as Record<string, unknown>).customPrompt;
 		if (typeof legacy === 'string' && legacy.trim()) {

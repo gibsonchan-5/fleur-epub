@@ -316,4 +316,4 @@ export class FixedLayout extends HTMLElement {
     }
 }
 
-customElements.define('foliate-fxl', FixedLayout)
+if (!customElements.get('foliate-fxl')) customElements.define('foliate-fxl', FixedLayout)

@@ -6,6 +6,27 @@ import { Notice, MarkdownRenderer } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { AIService } from './ai-service';
 import { resolveSystemPrompt, resolveAskHint } from './ai-prompts';
+import { isMobileUI } from './platform';
+
+/** 创建展开图标（收起态，向上展开为大对话视图） */
+function createExpandIcon(container: Node): void {
+  const svg = createSvgEl(container, 'svg', {
+    width: '16', height: '16', viewBox: '0 0 24 24',
+    fill: 'none', stroke: 'currentColor',
+    'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round'
+  });
+  createSvgEl(svg, 'polyline', { points: '18 15 12 9 6 15' });
+}
+
+/** 创建收起图标（展开态，向下收为轻量卡片） */
+function createCollapseIcon(container: Node): void {
+  const svg = createSvgEl(container, 'svg', {
+    width: '16', height: '16', viewBox: '0 0 24 24',
+    fill: 'none', stroke: 'currentColor',
+    'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round'
+  });
+  createSvgEl(svg, 'polyline', { points: '6 9 12 15 18 9' });
+}
 
 /** Create an SVG element (SVG tags aren't in HTMLElementTagNameMap, so createElementNS is required) */
 function createSvgEl(parent: Node, tag: string, attrs?: Record<string, string>): SVGElement {
@@ -132,13 +153,42 @@ export class AIChatPanel {
   constructor(
     private plugin: FleurEpubPlugin,
     private selectedText: string,
-    private mode: 'explain' | 'translate' = 'explain'
+    private mode: 'explain' | 'translate' | 'ask' = 'explain'
   ) {}
 
   open(anchorX?: number, anchorY?: number) {
     if (this.panelEl) this.close();
     this.buildPanel(anchorX, anchorY);
-    window.requestAnimationFrame(() => { void this.sendInitial(); });
+    window.requestAnimationFrame(() => {
+      if (this.mode === 'ask') {
+        // 自由问答模式：不预填选段、不自动发送，直接等用户提问
+        this.enterAskMode();
+      } else {
+        void this.sendInitial();
+      }
+    });
+  }
+
+  /** 自由问答模式（工具栏 AI 入口）：系统提示词就位，聚焦输入框等待提问 */
+  private enterAskMode() {
+    // 与解释模式同一套角色设定（跟随提示词模式设置），但没有预填选段
+    if (this.chatHistory.length === 0) {
+      let systemPrompt = resolveSystemPrompt(
+        this.plugin.settings.promptPreset,
+        this.plugin.settings.customPrompts
+      );
+      systemPrompt += '回答时使用 Markdown 格式，标题用 ## 或 ###，重点加粗。';
+      this.chatHistory = [{ role: 'system', content: systemPrompt }];
+    }
+    if (this.followUpInput) {
+      this.followUpInput.placeholder = '向阅读助手提问…';
+      this.followUpInput.focus();
+    }
+    if (this.bodyEl && !this.bodyEl.hasChildNodes()) {
+      const hint = this.bodyEl.createDiv();
+      hint.addClass('fleur-ai-ask-hint');
+      hint.setText('直接输入问题：可询问书中内容、前文情节或相关背景知识。');
+    }
   }
 
   close() {
@@ -171,21 +221,25 @@ export class AIChatPanel {
   private buildPanel(anchorX?: number, anchorY?: number) {
     this.panelEl = document.body.createDiv();
     this.panelEl.addClass('fleur-ai-panel');
+    const mobile = isMobileUI(this.plugin);
+    if (mobile) this.panelEl.addClass('fleur-ai-panel--mobile');
 
-    // 定位：已保存位置 > 鼠标坐标 > CSS 默认
-    const saved = AIChatPanel.getSavedPos(this.plugin);
-    if (saved) {
-      this.panelEl.setCssStyles({ right: '', left: saved.left + 'px', top: saved.top + 'px' });
-    } else if (anchorX !== undefined && anchorY !== undefined) {
-      const panelWidth = 440;
-      const panelHeight = 560;
-      const left = anchorX + panelWidth + 20 < window.innerWidth
-        ? anchorX + 20
-        : Math.max(20, anchorX - panelWidth - 20);
-      const top = anchorY + panelHeight + 20 < window.innerHeight
-        ? anchorY + 20
-        : Math.max(20, anchorY - panelHeight - 20);
-      this.panelEl.setCssStyles({ right: '', left: left + 'px', top: top + 'px' });
+    // 定位：桌面 = 已保存位置 > 鼠标坐标 > CSS 默认；移动端 = 底部轻量卡片（纯 CSS 定位）
+    if (!mobile) {
+      const saved = AIChatPanel.getSavedPos(this.plugin);
+      if (saved) {
+        this.panelEl.setCssStyles({ right: '', left: saved.left + 'px', top: saved.top + 'px' });
+      } else if (anchorX !== undefined && anchorY !== undefined) {
+        const panelWidth = 440;
+        const panelHeight = 560;
+        const left = anchorX + panelWidth + 20 < window.innerWidth
+          ? anchorX + 20
+          : Math.max(20, anchorX - panelWidth - 20);
+        const top = anchorY + panelHeight + 20 < window.innerHeight
+          ? anchorY + 20
+          : Math.max(20, anchorY - panelHeight - 20);
+        this.panelEl.setCssStyles({ right: '', left: left + 'px', top: top + 'px' });
+      }
     }
 
     // 点击外部关闭
@@ -199,11 +253,30 @@ export class AIChatPanel {
     // ─ 标题栏（拖拽手柄） ──
     const header = this.panelEl.createDiv();
     header.addClass('fleur-ai-header');
-    header.addEventListener('mousedown', (e) => this.onDragStart(e));
+    // 拖拽仅桌面；移动端以展开/收起替代拖拽
+    if (!mobile) header.addEventListener('mousedown', (e) => this.onDragStart(e));
 
     const title = header.createSpan();
     title.addClass('fleur-ai-title');
     title.setText('阅读助手');
+
+    // 移动端：展开/收起按钮（轻量卡片 ↔ 大半屏对话，微信读书式两级形态）
+    if (mobile) {
+      const expandBtn = header.createEl('button');
+      expandBtn.addClass('fleur-ai-expand-btn');
+      expandBtn.setAttribute('aria-label', '展开对话');
+      createExpandIcon(expandBtn);
+      expandBtn.addEventListener('click', () => {
+        const el = this.panelEl;
+        if (!el) return;
+        const expanded = el.hasClass('is-expanded');
+        el.toggleClass('is-expanded', !expanded);
+        expandBtn.setAttribute('aria-label', expanded ? '展开对话' : '收起卡片');
+        expandBtn.empty();
+        if (expanded) createExpandIcon(expandBtn);
+        else createCollapseIcon(expandBtn);
+      });
+    }
 
     const closeBtn = header.createEl('button');
     closeBtn.addClass('fleur-ai-close-btn');
@@ -233,7 +306,8 @@ export class AIChatPanel {
     createSendIcon(this.sendBtn);
     this.sendBtn.addEventListener('click', () => this.onSendOrAbort());
 
-    // ── 右下角尺寸调整手柄 ──
+    // ── 右下角尺寸调整手柄（仅桌面；移动端以展开/收起替代缩放） ──
+    if (mobile) return;
     const resizeHandle = this.panelEl.createDiv();
     resizeHandle.addClass('fleur-ai-resize-handle');
     resizeHandle.addEventListener('mousedown', (e) => this.onResizeStart(e));

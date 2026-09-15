@@ -53,11 +53,19 @@ export function hashString(s: string): string {
 	return (h >>> 0).toString(16).padStart(8, '0');
 }
 
-/** 书指纹：identifier 优先，缺省用 title+creator+language 组合 */
+/** 书指纹：identifier + 书名 联合哈希；缺 identifier 时用 title+creator+language 组合。
+ *
+ * ⚠️ 不能只用 identifier：部分打包工具（如 z-library）会给不同书籍打入完全相同的
+ * UUID（实际案例：5 本书共用 urn:uuid:273fd756-…），identifier 单独做指纹会跨书串
+ * 批注/进度。混入书名后即天然去重（同名同 identifier 视为同一本书的重复文件）。
+ */
 export function computeFingerprint(meta: BookMeta): string {
-	if (meta.identifier?.trim()) return hashString(meta.identifier.trim());
+	const ident = meta.identifier?.trim();
+	if (ident) {
+		return hashString(ident + '|' + (meta.title ?? '').trim().toLowerCase());
+	}
 	const fallback = [meta.title, meta.creator, meta.language]
-		.map((x) => (x ?? '').trim().toLowerCase())
+		.map((x) => (typeof x === 'string' ? x.trim().toLowerCase() : ''))
 		.join('|');
 	return hashString(fallback || 'unknown');
 }

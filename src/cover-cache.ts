@@ -2,9 +2,9 @@
 // 书架上几十本书逐一解析 zip 较慢，故：① 先渲染占位再异步补封面；② 缩略图落盘，
 // 二次打开书架直接读缓存，不再解析 EPUB。
 
-import { App, Plugin, TFile, arrayBufferToBase64 } from 'obsidian';
+import { App, Events, Plugin, TFile, arrayBufferToBase64 } from 'obsidian';
 import { makeBook } from '../vendor/foliate-js/view.js';
-import { hashString } from './store';
+import { computeFingerprint, hashString } from './store';
 
 export interface BookCoverInfo {
 	/** 封面缩略图的 data URL（自包含，无 blob 生命周期问题）；无封面时为 null */
@@ -13,6 +13,8 @@ export interface BookCoverInfo {
 	title: string;
 	/** OPF 中的作者 */
 	author: string;
+	/** 书指纹（identifier + 书名联合哈希）：书架网格用它查阅读进度；旧缓存可能缺省 */
+	fingerprint?: string;
 }
 
 /** 缩略图最大宽度（px），够书架卡片 2x 显示即可 */
@@ -30,7 +32,7 @@ export class CoverCache {
 	/** 进行中的任务（避免同一本书重复解析） */
 	private inflight = new Map<string, Promise<BookCoverInfo>>();
 
-	constructor(private app: App, _plugin: Plugin) {}
+	constructor(private app: App, private plugin: Plugin & { events?: Events }) {}
 
 	private dir(): string {
 		return `${this.app.vault.configDir}/plugins/fleur-epub/covers`;
@@ -90,50 +92,88 @@ export class CoverCache {
 		const key = this.keyOf(file);
 		const adapter = this.app.vault.adapter;
 
-		// ① 磁盘缓存命中：直接读缩略图，无需解析 EPUB
-		try {
-			if (await adapter.exists(this.metaPath(key))) {
-				const meta = JSON.parse(await adapter.read(this.metaPath(key))) as BookCoverInfo;
-				let url: string | null = null;
-				if (await adapter.exists(this.imgPath(key))) {
-					const buf = await adapter.readBinary(this.imgPath(key));
-					url = `data:image/webp;base64,${arrayBufferToBase64(buf)}`;
-				}
-				const info: BookCoverInfo = { url, title: meta.title, author: meta.author };
-				this.mem.set(file.path, info);
-				return info;
+	// ① 磁盘缓存命中：直接读缩略图，无需解析 EPUB
+	try {
+		if (await adapter.exists(this.metaPath(key))) {
+			const meta = JSON.parse(await adapter.read(this.metaPath(key))) as BookCoverInfo;
+			let url: string | null = null;
+			if (await adapter.exists(this.imgPath(key))) {
+				const buf = await adapter.readBinary(this.imgPath(key));
+				url = `data:image/webp;base64,${arrayBufferToBase64(buf)}`;
 			}
-		} catch (e) {
-			console.warn('[FleurEPUB] 读取封面缓存失败', file.path, e);
+			const info: BookCoverInfo = { url, title: meta.title, author: meta.author, fingerprint: meta.fingerprint };
+			this.mem.set(file.path, info);
+			// 旧缓存缺指纹（v1.1 前生成）：后台补一次元数据解析，补齐后通知书架刷新
+			if (!info.fingerprint) this.backfillFingerprint(file);
+			return info;
 		}
+	} catch (e) {
+		console.warn('[FleurEPUB] 读取封面缓存失败', file.path, e);
+	}
 
-		// ② 解析 EPUB：仅取 metadata 与封面图
-		let title = file.basename;
-		let author = '';
-		let url: string | null = null;
-		try {
-			const bytes = await this.app.vault.readBinary(file);
-			const fileObj = new File([bytes], file.name, { type: 'application/epub+zip' });
-			const book: any = await makeBook(fileObj);
-			const md = book?.metadata ?? {};
-			title = firstStr(md.title) || file.basename;
-			author = firstStr(md.creator) || '';
-			const cover: Blob | null = (await book?.getCover?.()) ?? null;
-			if (cover) {
-				const thumb = await this.makeThumb(cover);
-				if (thumb) {
-					url = await this.toDataUrl(thumb);
-					void this.persist(key, { url, title, author }, thumb);
-				}
+	// ② 解析 EPUB：仅取 metadata 与封面图
+	let title = file.basename;
+	let author = '';
+	let identifier = '';
+	let url: string | null = null;
+	try {
+		const bytes = await this.app.vault.readBinary(file);
+		const fileObj = new File([bytes], file.name, { type: 'application/epub+zip' });
+		const book: any = await makeBook(fileObj);
+		const md = book?.metadata ?? {};
+		title = firstStr(md.title) || file.basename;
+		author = firstStr(md.creator) || '';
+		identifier = firstStr(md.identifier);
+		const cover: Blob | null = (await book?.getCover?.()) ?? null;
+		if (cover) {
+			const thumb = await this.makeThumb(cover);
+			if (thumb) {
+				url = await this.toDataUrl(thumb);
+				void this.persist(key, { url, title, author, fingerprint: this.fpOf(identifier, title, author) }, thumb);
 			}
-		} catch (e) {
-			console.warn('[FleurEPUB] 解析封面失败', file.path, e);
 		}
+	} catch (e) {
+		console.warn('[FleurEPUB] 解析封面失败', file.path, e);
+	}
 
-		const info: BookCoverInfo = { url, title, author };
-		this.mem.set(file.path, info);
-		if (!url) void this.persist(key, info, null);
-		return info;
+	const info: BookCoverInfo = { url, title, author, fingerprint: this.fpOf(identifier, title, author) };
+	this.mem.set(file.path, info);
+	if (!url) void this.persist(key, info, null);
+	return info;
+}
+
+	/** 由 metadata 组装书指纹（与 reader-view 打开书时的 computeFingerprint 同一算法） */
+	private fpOf(identifier: string, title: string, author: string): string {
+		return computeFingerprint({ identifier: identifier || undefined, title, creator: author });
+	}
+
+	/** 旧磁盘缓存缺指纹：补一次仅元数据的解析（不取封面），补齐后触发书架刷新 */
+	private backfillFingerprint(file: TFile): void {
+		void this.slot()
+			.then(async () => {
+				try {
+					const bytes = await this.app.vault.readBinary(file);
+					const fileObj = new File([bytes], file.name, { type: 'application/epub+zip' });
+					const book: any = await makeBook(fileObj);
+					const md = book?.metadata ?? {};
+					const title = firstStr(md.title) || file.basename;
+					const author = firstStr(md.creator) || '';
+					const identifier = firstStr(md.identifier);
+					const prev = this.mem.get(file.path);
+					const info: BookCoverInfo = {
+						url: prev?.url ?? null,
+						title,
+						author,
+						fingerprint: this.fpOf(identifier, title, author),
+					};
+					this.mem.set(file.path, info);
+					void this.persist(this.keyOf(file), info, null);
+					this.plugin.events?.trigger('fleur-epub:covers-updated');
+				} catch {
+					// 解析失败保持现状：书架卡片不显示进度
+				}
+			})
+			.finally(() => this.release());
 	}
 
 	/** Blob → data URL（自包含，不依赖 objectURL 生命周期） */

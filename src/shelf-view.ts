@@ -10,6 +10,8 @@ import { compare as CFIcompare } from '../vendor/foliate-js/epubcfi.js';
 import { AIService } from './ai-service';
 import { resolveSystemPrompt } from './ai-prompts';
 import { stripMarkdown, cleanAnnotationText } from './text-utils';
+import { exportAnnotationsToNote } from './annotation-export';
+import { isMobileUI } from './platform';
 import type { EpubAnnotation } from './store';
 
 export const VIEW_TYPE_SHELF = 'fleur-epub-shelf';
@@ -100,6 +102,8 @@ export class ShelfView extends ItemView {
 	private searchInputEl!: HTMLInputElement;
 	private searchResults: SearchResultItem[] = [];
 	private searching = false;
+	/** 最近打开时间缓存：path → progress.updatedAt（0 = 未读/未知），用于书架排序 */
+	private recentOpenMap = new Map<string, number>();
 
 	constructor(leaf: WorkspaceLeaf, private plugin: FleurEpubPlugin) {
 		super(leaf);
@@ -140,12 +144,35 @@ export class ShelfView extends ItemView {
 				if (this.mode === 'book' && this.tab === 'ann') this.renderList();
 			}),
 		);
+		// 封面缓存补齐指纹（旧缓存后台回填）→ 书架重渲染以显示进度
+		this.registerEvent(
+			this.plugin.events.on('fleur-epub:covers-updated', () => {
+				if (this.mode === 'shelf') this.renderShelf();
+			}),
+		);
 
 		// onOpen 时根据当前 active reader 决定初始 mode（兜底：若 onOpen 之前
-		// book-opened 已经触发过、shelf 错过了，同步到 book 模式）
+		// book-opened 已经触发过、shelf 错过了，同步到 book 模式）。
+		// 移动端例外：书架视图打开时直接落在书架列表——书内面板（目录/批注/检索）
+		// 的功能已由阅读器底部工具栏承担，退出书后停在面板上反而多一步。
 		const active = !!this.plugin.getActiveReader();
 		this.mode = active ? 'book' : 'shelf';
+		if (isMobileUI(this.plugin)) {
+			this.mode = 'shelf';
+			this.manualShelf = true;
+		}
 		this.renderAll();
+	}
+
+	/**
+	 * 强制切回书架模式（移动端 openShelf 退出书时调用）。
+	 * 复用已有 shelf leaf 时 onOpen 不会重跑，由这里显式切换；
+	 * 骨架未建好时只置状态，交给 onOpen 的移动端分支兜底。
+	 */
+	forceShelfMode(): void {
+		this.manualShelf = true;
+		this.mode = 'shelf';
+		if (this.listEl && this.headerEl) this.renderAll();
 	}
 
 	/** 骨架：头部（返回 + 标题）+ tab 栏 + 列表区 */
@@ -227,11 +254,12 @@ export class ShelfView extends ItemView {
 			.getFiles()
 			// Windows 文件扩展名大小写不保真（.EPUB / .Epub 常见），统一小写比较
 			.filter((f) => f.extension.toLowerCase() === 'epub')
-			.filter((f) => !this.query || f.basename.toLowerCase().includes(this.query))
-			.sort((a, b) => a.basename.localeCompare(b.basename));
-
-		// 有书在读时，书架顶部显示「继续阅读」入口（用户点 back 停在书架后的回路）
-		if (!this.query) this.renderReadingEntry();
+			.filter((f) => !this.query || f.basename.toLowerCase().includes(this.query));
+		// 排序：最近打开优先（progress.updatedAt，读到即最近在读），未读/同时间的按书名
+		const lastOpen = (f: TFile) => this.recentOpenMap.get(f.path) ?? 0;
+		files.sort((a, b) => lastOpen(b) - lastOpen(a) || a.basename.localeCompare(b.basename));
+		// 异步回填最近打开时间（首次渲染可能还是字母序，回填后重排一次）
+		void this.fillRecentOpen(files);
 
 		if (files.length === 0) {
 			this.emptyEl.toggle(true);
@@ -239,7 +267,102 @@ export class ShelfView extends ItemView {
 			return;
 		}
 
-		for (const file of files) this.renderBookRow(file);
+		// 移动端：微信读书式大封面网格（is-grid 摘除已由 renderList 处理）
+		const grid = isMobileUI(this.plugin);
+		this.listEl.toggleClass('is-grid', grid);
+		for (const file of files) {
+			if (grid) this.renderBookCard(file);
+			else this.renderBookRow(file);
+		}
+	}
+
+	/**
+	 * 异步回填每本书的最近打开时间（progress.updatedAt，读到即最近在读）。
+	 * 与上一轮结果比较，有变化才重排一次书架；无变化不触发渲染（防回填死循环）。
+	 */
+	private async fillRecentOpen(files: TFile[]): Promise<void> {
+		const next = new Map<string, number>();
+		for (const file of files) {
+			const info = this.plugin.coverCache ? await this.plugin.coverCache.get(file) : null;
+			const fp = info?.fingerprint;
+			let t = 0;
+			if (fp) {
+				const data = await this.plugin.bookStore.load(fp);
+				t = data?.progress?.updatedAt ?? 0;
+			}
+			next.set(file.path, t);
+		}
+		let changed = next.size !== this.recentOpenMap.size;
+		if (!changed) {
+			for (const [path, t] of next) {
+				if (this.recentOpenMap.get(path) !== t) {
+					changed = true;
+					break;
+				}
+			}
+		}
+		this.recentOpenMap = next;
+		if (changed && this.mode === 'shelf') this.renderShelf();
+	}
+
+	/**
+	 * 移动端书架（微信读书式）：大封面卡片网格 + 封面下方阅读进度。
+	 * 布局与列表共用 renderShelf 的文件枚举/搜索；卡片点击与列表行同一入口。
+	 */
+	private renderBookCard(file: TFile): void {
+		const card = createDiv('fleur-epub-shelf-card');
+		const cover = card.createDiv('fleur-epub-shelf-card-cover');
+		const title = card.createDiv('fleur-epub-shelf-card-title');
+		const bar = card.createDiv('fleur-epub-shelf-card-bar');
+		const fill = bar.createDiv('fleur-epub-shelf-card-bar-fill');
+		const pct = card.createDiv('fleur-epub-shelf-card-pct');
+
+		const cached = this.plugin.coverCache?.peek(file);
+		if (cached?.url) {
+			cover.addClass('is-loaded');
+			cover.style.backgroundImage = `url("${cached.url}")`;
+		}
+		if (cached) title.setText(cached.title || file.basename);
+		else {
+			title.setText(file.basename);
+			void this.plugin.coverCache
+				?.get(file)
+				.then((info) => {
+					if (!card.isConnected) return;
+					if (info.url) {
+						cover.addClass('is-loaded');
+						cover.style.backgroundImage = `url("${info.url}")`;
+					}
+					title.setText(info.title || file.basename);
+				})
+				.catch(() => {});
+		}
+
+		// 阅读进度：指纹 → bookStore.load；无指纹/无进度则隐藏进度条
+		void this.loadCardProgress(file, fill, pct, card);
+
+		card.addEventListener('click', () => this.openShelfItem(file));
+		this.listEl.appendChild(card);
+	}
+
+	/** 卡片进度：依赖 cover-cache 的 fingerprint（旧缓存由其后台回填并触发重渲染） */
+	private async loadCardProgress(
+		file: TFile,
+		fill: HTMLElement,
+		pct: HTMLElement,
+		card: HTMLElement,
+	): Promise<void> {
+		const info = this.plugin.coverCache ? await this.plugin.coverCache.get(file) : null;
+		if (!card.isConnected) return;
+		const fp = info?.fingerprint;
+		if (!fp) return;
+		const data = await this.plugin.bookStore.load(fp);
+		if (!card.isConnected) return;
+		const p = data?.progress?.percent;
+		if (typeof p === 'number' && p > 0) {
+			fill.style.width = `${Math.min(100, Math.max(3, Math.round(p)))}%`;
+			pct.setText(`${Math.round(p)}%`);
+		}
 	}
 
 	/** 点击书架条目的统一入口：正在读的书直接回书内面板，其余交给 openEpub */
@@ -254,26 +377,6 @@ export class ShelfView extends ItemView {
 			return;
 		}
 		void this.plugin.openEpub(file);
-	}
-
-	/** 书架顶部「继续阅读」条目（仅当有书在读且无搜索词时显示） */
-	private renderReadingEntry(): void {
-		const reader = this.plugin.getActiveReader();
-		const path = reader?.getLoadedFilePath() ?? null;
-		const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
-		if (!reader || !(file instanceof TFile)) return;
-
-		const entry = createDiv('fleur-epub-shelf-reading');
-		const label = entry.createSpan({ text: '继续阅读', cls: 'fleur-epub-shelf-reading-label' });
-		label.createSpan({ text: '›', cls: 'fleur-epub-shelf-reading-arrow' });
-		entry.createSpan({ text: reader.getDisplayText(), cls: 'fleur-epub-shelf-reading-name' });
-		entry.addEventListener('click', () => {
-			this.manualShelf = false;
-			this.mode = 'book';
-			this.renderAll();
-			void this.plugin.openEpub(file);
-		});
-		this.listEl.appendChild(entry);
 	}
 
 	/** 列表行：小封面缩略图 + 书名 + 路径 */
@@ -641,67 +744,14 @@ export class ShelfView extends ItemView {
 		);
 	}
 
-	/** 导出批注笔记（Markdown，按章节分组；同名自动覆盖，与 fleur-pdf 一致） */
+	/** 导出批注笔记（共享实现，见 annotation-export.ts；桌面书架与移动端 sheet 共用） */
 	private async exportNotes(): Promise<void> {
 		const reader = this.plugin.getActiveReader();
-		const list = reader?.getAnnotations() ?? [];
 		if (!reader) {
 			new Notice('请先打开一本书');
 			return;
 		}
-		if (list.length === 0) {
-			new Notice('当前书没有批注可导出');
-			return;
-		}
-
-		const noteName = `${reader.getDisplayText()} - 批注笔记`;
-		// 导出文件夹（设置项，默认 FleurEpub；'' = vault 根目录）— fleur-pdf 同款逻辑
-		const folder = this.plugin.settings.noteFolder?.trim() || '';
-		const notePath = folder ? `${folder}/${noteName}.md` : `${noteName}.md`;
-
-		try {
-			// 确保导出文件夹存在（默认 FleurEpub，首次导出自动创建）
-			if (folder) {
-				const folderExists = await this.app.vault.adapter.exists(folder);
-				if (!folderExists) await this.app.vault.createFolder(folder);
-			}
-
-			const exists = await this.app.vault.adapter.exists(notePath);
-			if (exists) {
-				const existing = this.app.vault.getAbstractFileByPath(notePath);
-				if (existing) await this.app.vault.trash(existing, false);
-			}
-
-			let md = `> 导出时间：${new Date().toLocaleString('zh-CN')}\n\n`;
-			const grouped = new Map<string, EpubAnnotation[]>();
-			for (const ann of list) {
-				const key = ann.chapterLabel?.trim() || '未命名章节';
-				if (!grouped.has(key)) grouped.set(key, []);
-				grouped.get(key)!.push(ann);
-			}
-			for (const [chapter, items] of grouped) {
-				md += `## ${chapter}\n\n`;
-				for (const ann of items) {
-					const t = normalizeWhitespace(ann.text);
-					const color = HIGHLIGHT_COLORS[ann.color] ?? HIGHLIGHT_COLORS.yellow;
-					if (ann.kind === 'highlight') {
-						const fg = pickReadableFg(color);
-						md += `<span style="background-color:${color};color:${fg};padding:0 2px;border-radius:2px">${t}</span>\n\n`;
-					} else {
-						const style = ann.kind === 'wavy' ? 'wavy' : 'solid';
-						md += `<span style="text-decoration:underline;text-decoration-color:${color};text-decoration-style:${style}">${t}</span>\n\n`;
-					}
-					if (ann.comment) md += `> ${cleanAnnotationText(normalizeWhitespace(ann.comment))}\n\n`;
-					md += `---\n\n`;
-				}
-			}
-
-			await this.app.vault.create(notePath, md);
-			new Notice('笔记已导出', 2000);
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			new Notice(`导出失败：${msg}`);
-		}
+		await exportAnnotationsToNote(this.plugin, reader);
 	}
 
 	// ── 检索 tab ──

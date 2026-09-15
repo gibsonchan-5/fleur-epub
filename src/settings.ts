@@ -1,6 +1,7 @@
 import { App, PluginSettingTab, Setting, DropdownComponent, Notice, requestUrl } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { PROMPT_PRESETS, getPromptPreset, getPresetPreview, isCustomPresetKey, ANNOTATION_DEFAULT_BASE_LIMIT, type PromptPresetKey } from './ai-prompts';
+import { applyMobileBodyClass } from './platform';
 
 /** 阅读背景主题：浅色 / 深色 / 暖黄 / 豆绿（微信读书式四色） */
 export type ReaderTheme = 'light' | 'dark' | 'sepia' | 'green';
@@ -57,6 +58,12 @@ export interface FleurEpubSettings {
 	annPopSize?: { w: number; h: number };
 	/** 批注笔记导出文件夹（vault 内相对路径；'' = 根目录，默认 FleurEpub） */
 	noteFolder: string;
+	/** 移动端调试：桌面端强制启用移动端布局（预览/开发用途，默认关） */
+	mobileDebug: boolean;
+	/** 听书声源：系统 TTS voiceURI（'' = 跟随章节语言自动选系统默认） */
+	ttsVoiceURI: string;
+	/** 听书语速（播放器可调，持久化） */
+	ttsRate: number;
 }
 
 export const DEFAULT_SETTINGS: FleurEpubSettings = {
@@ -83,6 +90,9 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	annotationLimit: 250,
 	annotationSort: 'time',
 	noteFolder: 'FleurEpub',
+	mobileDebug: false,
+	ttsVoiceURI: '',
+	ttsRate: 1,
 };
 
 export class FleurEpubSettingTab extends PluginSettingTab {
@@ -496,6 +506,19 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 				}, 3000);
 			});
 		});
+		// ── 高级（移动端调试等开发向开关） ──
+		new Setting(containerEl).setName('高级').setHeading();
+
+		new Setting(containerEl)
+			.setName('移动端调试模式')
+			.setDesc('在桌面端强制启用移动端布局（顶栏紧凑化、底部安全区等），用于预览与开发。关闭后桌面端完全恢复原状，不影响任何桌面功能。')
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.mobileDebug).onChange(async (v) => {
+					this.plugin.settings.mobileDebug = v;
+					await this.plugin.saveSettings();
+					applyMobileBodyClass(this.plugin);
+				}),
+			);
 	}
 
 	/**

@@ -11,3 +11,6 @@ test-harness.html
 
 # 调试复现台（含真实书籍，严禁入库）
 scroll-debug/
+
+# 本地备份
+_backup*/
