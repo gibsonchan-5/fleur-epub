@@ -36,6 +36,16 @@ function createSvgEl(parent: Node, tag: string, attrs?: Record<string, string>):
       el.setAttribute(k, v);
     }
   }
+  if (tag === 'svg') {
+    // 安卓主题免疫：部分主题（如小米平板上遇到的）用 button svg 规则清掉描边，
+    // 表现为发送/停止/展开按钮成空白方块（iOS 同代码正常）。svg 的 stroke="currentColor"
+    // 只是表现属性，优先级最低；这里用「内联样式 + important」锁死描边与填充——
+    // 内联 important 是 CSS 的最高优先级，任何主题规则（含 !important）都打不穿。
+    el.style.setProperty('stroke', 'currentColor', 'important');
+    el.style.setProperty('fill', 'none', 'important');
+    const sw = attrs?.['stroke-width'];
+    if (sw) el.style.setProperty('stroke-width', sw, 'important');
+  }
   parent.appendChild(el);
   return el;
 }

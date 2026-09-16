@@ -143,24 +143,8 @@
 	font-family: var(--font-interface);
 }
 
-/* 页脚角标（微信读书式）：左下阅读进度 / 右下章节页码，随阅读主题联动 */
-.fleur-epub-pagebadges {
-	position: absolute;
-	left: 0;
-	right: 0;
-	bottom: calc(6px + var(--fleur-epub-safe-bottom, 0px));
-	display: flex;
-	/* 进度环已移到右上角，这一行只剩右下角页码 → 贴右对齐 */
-	justify-content: flex-end;
-	align-items: center;
-	padding: 0 14px;
-	pointer-events: none;
-	z-index: 30;
-}
-
-/* 进度环（顶栏内联，与「译」并置）：细描边圆环 + 中心百分数。
-   放顶栏而非阅读区浮层 → 滚动/翻页两种模式都能看到阅读进度，且不压正文；
-   翻页模式的章节页码仍在右下角（.fleur-epub-pagenum）。 */
+/* 进度环（顶栏最右，紧靠「滚动 / 翻页」分段控件右侧并置）：细描边圆环 + 中心百分数。
+   放顶栏而非阅读区浮层 → 滚动/翻页两种模式都能看到阅读进度，且不压正文。 */
 .fleur-epub-progress {
 	position: relative;
 	flex: 0 0 auto;
@@ -169,6 +153,8 @@
 	justify-content: center;
 	width: 26px;
 	height: 26px;
+	/* 与分段控件并置成一组：把顶栏 12px 的通用间距收到 8px */
+	margin-left: -4px;
 	/* 纯展示：不参与点击（顶栏按钮的触控区不受影响） */
 	pointer-events: none;
 	opacity: 0;
@@ -203,18 +189,6 @@
 	color: var(--fleur-epub-text-muted);
 	font-variant-numeric: tabular-nums;
 	/* 数字不带 % 号，留出呼吸感；语义完整度由 aria-label 承担 */
-}
-
-.fleur-epub-pagenum {
-	color: var(--fleur-epub-text-muted);
-	font-size: 11.5px;
-	font-variant-numeric: tabular-nums;
-	opacity: 0.85;
-}
-
-/* 滚动模式：章节页码无意义，隐藏（data-flow 由 applyFlow 维护） */
-.fleur-epub-root[data-flow='scrolled'] .fleur-epub-pagenum {
-	display: none;
 }
 
 /* 阅读区 */
@@ -1748,18 +1722,12 @@ body.fleur-epub-mobile .fleur-epub-mode-btn {
 	font-size: 12px;
 	padding: 6px 12px;
 }
-body.fleur-epub-mobile .fleur-epub-pagebadges {
-	padding: 0 16px;
-	bottom: calc(8px + var(--fleur-epub-safe-bottom, 0px));
-}
-body.fleur-epub-mobile .fleur-epub-pagenum {
-	font-size: 12px;
-}
-
-/* 移动端进度环：顶栏 48px，环放大到触屏可辨识（仍为纯展示） */
+/* 移动端进度环：顶栏 48px，环放大到触屏可辨识（仍为纯展示、紧靠分段控件右侧） */
 body.fleur-epub-mobile .fleur-epub-progress {
 	width: 30px;
 	height: 30px;
+	/* 移动端顶栏间距本就 4px，无需再收 */
+	margin-left: 0;
 }
 body.fleur-epub-mobile .fleur-epub-progress-num {
 	font-size: 9.5px;
@@ -2158,11 +2126,13 @@ body.fleur-epub-mobile .fleur-ai-panel--mobile .fleur-ai-header {
 
 /* 图标免疫：面板内图标是 stroke 型 SVG，stroke="currentColor" 属于 SVG 表现属性，
    优先级低于任何 CSS 规则——部分主题的 svg/button svg 规则会把描边清掉，
-   表现为按钮全是空白方块（文本 × 不受影响）。这里用显式 CSS 接管描边与填充。 */
+   表现为按钮全是空白方块（文本 × 不受影响）。这里用显式 CSS 接管描边与填充。
+   注：createSvgEl 创建的图标已在元素上加了内联 important 锁（最高优先级），
+   此规则是兜底层，覆盖非 createSvgEl 路径的图标。 */
 body .fleur-ai-panel svg,
 body .fleur-ai-panel button svg {
-	stroke: currentColor;
-	fill: none;
+	stroke: currentColor !important;
+	fill: none !important;
 }
 body .fleur-ai-panel .fleur-ai-action-btn,
 body .fleur-ai-panel .fleur-ai-expand-btn,

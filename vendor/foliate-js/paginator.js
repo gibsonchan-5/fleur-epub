@@ -623,9 +623,15 @@ export class Paginator extends HTMLElement {
         this.#observer.observe(this.#container)
         this.#container.addEventListener('scroll', () => {
             // fleur-epub patch: 章缘过冲累计仅在容器完全停住后仍继续拖拽时增长；
-            // 惯性滚动 / rubber-band 期间位置仍在变化（scroll 持续触发），一律清零，
-            // 防止「快速滚到章底的自然回弹」被误判为「继续拖拽跨章」。
-            if (this.#edgeOverscroll != null) this.#edgeOverscroll = null
+            // 惯性滚动 / rubber-band 期间位置仍在变化（scroll 持续触发），需防「快速滚到
+            // 章底的自然回弹」被误判为「继续拖拽跨章」。但不能一律清零——iOS 橡皮筋
+            // 过冲时 scroll 位置同样持续变化并触发 scroll 事件，一律清零会把触摸端
+            // 「拖过章缘 → 跨章」的累计抵消掉（表现为 iPhone 上卡在章节末无法继续滚）。
+            // 只在位置回到内容区间内（真正在滚动内容）时才清零；章缘处（含过冲）保留累计。
+            if (this.#edgeOverscroll != null) {
+                const atEdge = this.viewSize - this.end <= 2 || this.start <= 2
+                if (!atEdge) this.#edgeOverscroll = null
+            }
             this.dispatchEvent(new Event('scroll'))
         })
         this.#container.addEventListener('scroll', debounce(() => {

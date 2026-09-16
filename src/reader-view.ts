@@ -25,7 +25,7 @@ export const VIEW_TYPE_EPUB = 'fleur-epub-view';
 /** 左右点按翻页的区域宽度占比（与微信读书一致的左右各 ~38%） */
 const ZONE_RATIO = 0.38;
 
-/** 右上角进度环几何：SVG viewBox 36×36，进度用 dashoffset 表达 */
+/** 进度环几何：SVG viewBox 36×36，进度用 dashoffset 表达 */
 const RING_RADIUS = 15.5;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
@@ -173,12 +173,10 @@ export class EpubReaderView extends FileView {
 	private saveTimer: number | null = null;
 	/** 标注重挂就绪轮询计时（foliate load 事件早于 overlayer 创建，需延迟挂载） */
 	private annMountTimer: number | null = null;
-	/** 右上角进度环：环形进度条 + 中心百分数（滚动/翻页两种模式通用） */
+	/** 顶栏进度环：环形进度条 + 中心百分数（滚动/翻页两种模式通用） */
 	private progressEl!: HTMLElement;
 	private progressArcEl!: SVGCircleElement;
 	private progressNumEl!: HTMLElement;
-	/** 页脚角标：右下章节页码（翻页模式；滚动模式隐藏） */
-	private pageEl!: HTMLElement;
 	private titleEl!: HTMLElement;
 	private readerEl!: HTMLElement;
 	private modeBtnScroll!: HTMLElement;
@@ -327,8 +325,6 @@ export class EpubReaderView extends FileView {
 		}
 
 		right.appendChild(trBtn);
-		// 进度环与「译」并置（同一行）：顶栏内联，两种阅读模式都能看到全书进度
-		right.appendChild(this.buildProgressRing());
 		if (this.ttsBtn) right.appendChild(this.ttsBtn);
 
 		// 沉浸全屏（仅移动端）：隐藏 Obsidian 移动端顶部导航，阅读区铺满整屏
@@ -345,18 +341,15 @@ export class EpubReaderView extends FileView {
 		}
 
 		right.appendChild(seg);
+		// 进度环紧靠模式切换右侧并置（微信读书式：一个环看全书进度），
+		// 滚动 / 翻页两种模式都常驻可见；间距由 CSS 收紧，视觉上成一组。
+		right.appendChild(this.buildProgressRing());
 		bar.appendChild(this.titleEl);
 		bar.appendChild(right);
 
 		this.readerEl = createDiv('fleur-epub-reader');
 		this.contentEl.appendChild(bar);
 		this.contentEl.appendChild(this.readerEl);
-
-		// 页脚角标：右下章节页码（仅翻页模式显示；滚动模式 CSS 隐藏）
-		const badges = createDiv('fleur-epub-pagebadges');
-		this.pageEl = createSpan('fleur-epub-pagenum');
-		badges.appendChild(this.pageEl);
-		this.readerEl.appendChild(badges);
 
 		// 宿主侧键盘翻页（焦点在宿主时生效；iframe 内的由 bindDocEvents 覆盖）
 		this.contentEl.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -507,10 +500,7 @@ export class EpubReaderView extends FileView {
 		}
 	}
 
-	/**
-	 * 右上角进度环：细描边环 + 中心百分数。
-	 * 放阅读区浮层而非页脚，是为了滚动模式也有进度可看（翻页模式另在右下角显示章节页码）。
-	 */
+	/** 顶栏进度环：细描边环 + 中心百分数（紧靠「滚动 / 翻页」分段控件右侧，两种模式通用） */
 	private buildProgressRing(): HTMLElement {
 		const wrap = createDiv('fleur-epub-progress');
 		wrap.setAttribute('role', 'img');
@@ -594,13 +584,6 @@ export class EpubReaderView extends FileView {
 				const d = e.detail ?? {};
 				const percent = typeof d.fraction === 'number' ? Math.round(d.fraction * 100) : undefined;
 				if (percent !== undefined) this.setProgress(percent);
-				// 章节页码（右下角标）：foliate 的 pages 含首尾 2 个空列，实际页数 = pages - 2
-				const r = view.renderer;
-				if (r && typeof r.page === 'number' && typeof r.pages === 'number' && r.pages > 2) {
-					this.pageEl.setText(`${r.page}/${r.pages - 2}`);
-				} else {
-					this.pageEl.setText('');
-				}
 				this.scheduleSaveProgress(d.cfi, percent);
 			});
 
@@ -728,6 +711,10 @@ export class EpubReaderView extends FileView {
 			this.bookData.book = meta;
 
 			this.titleEl.setText(meta.title ?? file.basename);
+
+			// 进度环立即显形：用已存进度先画一次，避免依赖首次 relocate 才有环
+			//（ relocate 未带 fraction 时环会一直 opacity:0，表现为「进度环不见了」）
+			this.setProgress(this.bookData.progress?.percent ?? 0);
 
 			const cfi = this.bookData.progress?.cfi;
 			// 看门狗只在调试模式下挂（避免普通使用白留一个空转计时器）
@@ -897,8 +884,6 @@ export class EpubReaderView extends FileView {
 			else renderer.removeAttribute('animated');
 			this.applyColumnLayout();
 		}
-		// 页脚角标联动：滚动模式隐藏章节页码（CSS 作用域）
-		this.contentEl.setAttribute('data-flow', flow);
 		this.modeBtnScroll.toggleClass('is-active', flow === 'scrolled');
 		this.modeBtnPage.toggleClass('is-active', flow === 'paginated');
 	}
@@ -1141,7 +1126,10 @@ export class EpubReaderView extends FileView {
 					: '';
 		return `
 			${fontFaces}
-			html { font-size: ${fontSize}px; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; --overlayer-highlight-opacity: .32; --overlayer-highlight-blend-mode: ${dark ? 'screen' : 'multiply'}; }
+			/* text-size-adjust:100% —— iOS WebKit 的文字自动膨胀（font boosting）只作用于
+			   部分布局形态：滚动模式整幅宽栏会被放大、翻页模式窄栏不会被放大，
+			   表现为两种阅读模式字号不一致。锁死 100% 后两模式严格同字号。 */
+			html { font-size: ${fontSize}px; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; --overlayer-highlight-opacity: .32; --overlayer-highlight-blend-mode: ${dark ? 'screen' : 'multiply'}; }
 			body {
 				font-family: ${bodyFont};
 				font-weight: ${w};
@@ -1282,6 +1270,36 @@ export class EpubReaderView extends FileView {
 		doc.addEventListener('wheel', (e: WheelEvent) => this.onReaderWheel(e), { passive: false });
 
 		doc.addEventListener('keydown', (e: KeyboardEvent) => this.handleKey(e));
+
+		// iOS 点按可靠性（滚动模式尤甚）：touch 过程中有轻微位移即被 WebKit 判为滚动，
+		// 合成 click 会被取消——脚注 / 书内链接表现为「点了没反应」「时灵时不灵」。
+		// touchend 识别「点按」手势（单指、短时长、位移 <10px）且落在链接上时，
+		// preventDefault 抑制不可靠的原生 click，改派发一次合成 click——
+		// foliate 的链接接管（link 事件）与标注命中（overlayer click）走同一链路，一并受益。
+		if (isMobileUI(this.plugin)) {
+			let tap = { x: 0, y: 0, t: 0, id: -1 };
+			doc.addEventListener('touchstart', (e: TouchEvent) => {
+				const t = e.changedTouches[0];
+				if (!t) return;
+				tap = { x: t.clientX, y: t.clientY, t: e.timeStamp, id: t.identifier };
+			}, { passive: true });
+			doc.addEventListener('touchend', (e: TouchEvent) => {
+				const t = e.changedTouches[0];
+				if (!t || t.identifier !== tap.id) return;
+				const dx = t.clientX - tap.x, dy = t.clientY - tap.y;
+				const dt = e.timeStamp - tap.t;
+				// 多指未抬完 / 拖拽 / 长按 → 交回原生行为（选择、系统预览等）
+				if (e.touches.length > 0 || dt > 500 || dx * dx + dy * dy > 100) return;
+				const a = (e.target as HTMLElement | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
+				if (!a) return;
+				e.preventDefault();
+				a.dispatchEvent(new MouseEvent('click', {
+					bubbles: true, cancelable: true,
+					clientX: t.clientX, clientY: t.clientY,
+					view: doc.defaultView ?? undefined,
+				}));
+			}, { passive: false });
+		}
 
 		// 选段结束 → 弹出选择工具条（mouseup 后选区才稳定）
 		// 移动分支改走 selectionchange：触摸选段没有 mouseup 语义，靠「选区 300ms 不再变化」判定稳定
@@ -1426,6 +1444,8 @@ export class EpubReaderView extends FileView {
 	private edgeAcc: number | null = null;
 	/** 跨章冷却：防止短章节落位前被二次触发、连翻两章 */
 	private chainCoolUntil = 0;
+	/** 脚注解析文档缓存（按章节序号）：跨章脚注免整章重解析（iPhone 上整章解析可达秒级） */
+	private fnDocCache = new Map<number, Promise<Document | null>>();
 
 	/** 滚轮处理总入口（iframe 文档与宿主容器共用，见 onOpen / bindDocEvents） */
 	private onReaderWheel(e: WheelEvent): void {
@@ -2418,7 +2438,21 @@ export class EpubReaderView extends FileView {
 			let doc: Document | null = null;
 			const live = (view.renderer?.getContents?.() ?? []).find((c: { index?: number }) => c.index === index);
 			if (live?.doc) doc = live.doc as Document;
-			else doc = (await book.sections?.[index]?.createDocument?.()) ?? null;
+			else {
+				// createDocument 会整章解析 XHTML——大章节（如古籍注本）在 iPhone 上秒级延迟，
+				// 表现为「点脚注卡半天」。按序号 memoize（只读文档，缓存安全），上限 6 章控内存。
+				let cached = this.fnDocCache.get(index);
+				if (!cached) {
+					cached = Promise.resolve(book.sections?.[index]?.createDocument?.() ?? null)
+						.catch(() => null);
+					if (this.fnDocCache.size >= 6) {
+						const oldest = this.fnDocCache.keys().next().value;
+						if (typeof oldest === 'number') this.fnDocCache.delete(oldest);
+					}
+					this.fnDocCache.set(index, cached);
+				}
+				doc = (await cached) ?? null;
+			}
 			let el: Element | null | undefined = doc ? anchor?.(doc) : null;
 			// 兜底：folio 的 getHTMLFragment 只认 id，部分书用 name 属性锚点
 			if (!el && doc && href.includes('#')) {
@@ -2430,13 +2464,24 @@ export class EpubReaderView extends FileView {
 				return void view.goTo(href);
 			}
 
+			// 目标锚归一化：calibre / KindleGen 制书最常见形态是把 id 放在空锚或仅含
+			// 序号的内联锚上（<a id="m1"></a> / <a id="note_1">[1]</a>），注释内容全在
+			// 其后的同一父块里（<p class="note">…）。提升到父块再判定与提取——否则
+			// 空锚的 elText 为空、被启发式判成「非脚注」而跳转（红楼梦即此形态）。
+			let target = el;
+			const elText0 = (target.textContent ?? '').trim();
+			if (elText0.length === 0 || (elText0.length <= 4 && /[\d\*†‡§①-⑳]/.test(elText0))) {
+				const block = target.closest?.('p, li, dd, dt, blockquote') ?? target.parentElement;
+				if (block && !/^h[1-6]$/i.test(block.tagName)) target = block;
+			}
+
 			// 分级识别脚注（标准标记 → class → 结构启发式）
-			if (!this.isFootnoteLink(a, el)) {
+			if (!this.isFootnoteLink(a, target)) {
 				trace(`${href} → jump（非脚注链接）`);
 				return void view.goTo(href);
 			}
 
-			const text = this.extractFootnoteText(el, a?.textContent ?? '');
+			const text = this.extractFootnoteText(target, a?.textContent ?? '');
 			if (!text) {
 				trace(`${href} → jump（脚注内容为空）`);
 				return void view.goTo(href);
@@ -2456,10 +2501,9 @@ export class EpubReaderView extends FileView {
 		}
 	}
 
-	/**
-	 * 分级识别脚注链接：
+	/** 分级识别脚注链接：
 	 * ① 标准标记：引用侧 epub:type/role=noteref；目标侧 footnote/note、doc-footnote、aside
-	 * ② class 兜底：footnote / noteref / endnote / sidenote（避免过宽的 note 全匹配）
+	 * ② class 兜底：footnote / noteref / endnote / sidenote / fnote / annotation（覆盖杜诗详注 p.fnote、万历十五年 p.annotation 等国产制书命名）
 	 * ③ 结构启发式：短文本标记（上标 / 数字 / 符号序号）指向小块元素 → 视为脚注
 	 */
 	private isFootnoteLink(a: HTMLElement | null | undefined, el: Element | null | undefined): boolean {
@@ -2469,7 +2513,7 @@ export class EpubReaderView extends FileView {
 		if (/noteref/i.test(mark(a))) return true;
 		if (/footnote|sidenote|endnote|\bnote\b/i.test(mark(el))) return true;
 		if (el?.tagName?.toLowerCase() === 'aside') return true;
-		if (/(^|[\s_-])(footnote|noteref|endnote|sidenote)/i.test(`${cls(a)} ${cls(el)}`)) return true;
+		if (/(^|[\s_-])(footnote|noteref|endnote|sidenote|fnote|annotation)/i.test(`${cls(a)} ${cls(el)}`)) return true;
 		// 结构启发式：引用是短文本（≤8 字符）且含序号形态（数字/星号/剑号/圈码），目标为小块正文
 		const refText = (a?.textContent ?? '').trim();
 		const elText = (el?.textContent ?? '').trim();
@@ -2477,8 +2521,14 @@ export class EpubReaderView extends FileView {
 			|| a?.parentElement?.tagName?.toLowerCase() === 'sup'
 			|| /[\d\*\u2020\u2021\u00a7\u2460-\u2473\u3251-\u325f\u32b1-\u32bf]/.test(refText);
 		const shortRef = refText.length > 0 && refText.length <= 8;
-		const smallTarget = elText.length > 0 && elText.length <= 500 && !/^h[1-6]$/i.test(el?.tagName ?? '');
+		// 上限 1200：目标多为「提升后的注释父块」，长注释（如佛经注疏数百字）不应被误杀
+		const smallTarget = elText.length > 0 && elText.length <= 1200 && !/^h[1-6]$/i.test(el?.tagName ?? '');
 		return !!(markerLike && shortRef && smallTarget);
+	}
+
+	/** 纯序号形态：「(1)」「[2]」「*」「①」等——说明锚点落在词典 dt / 独立标记节点上 */
+	private isMarkerOnlyText(t: string): boolean {
+		return /^[(\[]?[0-9*†‡§①-⑳]{1,4}[)\].。]?$/.test(t.replace(/\s+/g, ''));
 	}
 
 	/** 提取脚注纯文本：按块级元素分段；剥掉回链小链接（↩ / 返回 / ↑ 等）避免噪声 */
@@ -2504,7 +2554,7 @@ export class EpubReaderView extends FileView {
 			return lines.filter(Boolean).join('\n');
 		};
 		// 纯序号形态：「(1)」「[2]」「*」「①」等——说明锚点落在词典 dt / 独立标记节点上
-		const isMarkerOnly = (t: string) => /^[(\[]?[0-9*†‡§①-⑳]{1,4}[)\].。]?$/.test(t.replace(/\s+/g, ''));
+		const isMarkerOnly = (t: string) => this.isMarkerOnlyText(t);
 		// 同一父级内、锚点之后直到下一个带 id 元素（下一条标记）之间的内容 = 本条正文
 		const collectTail = (node: Element): string => {
 			let out = '';
@@ -2575,6 +2625,12 @@ export class EpubReaderView extends FileView {
 				const seg = sliceByMarker(text, parseInt(refNum[0], 10));
 				if (seg && seg.length < text.length) text = seg;
 			}
+		}
+		// 引用序号与提取文本开头的标记重复（目标提升到父块后，注释文本常自带「[1] 」前缀）→ 剥掉
+		if (text && refText) {
+			const esc = refText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			const stripped = text.replace(new RegExp(`^\\s*${esc}\\s*`), '').trim();
+			if (stripped) text = stripped;
 		}
 		return text;
 	}
