@@ -25,7 +25,8 @@ export class AIService {
 
     try {
       // Obsidian's requestUrl does not support SSE streaming; native fetch is required.
-      // eslint-disable-next-line no-restricted-syntax -- SSE streaming requires native fetch
+      // （此处原有一条 `eslint-disable-next-line no-restricted-syntax`，但审核配置并未启用该规则，
+      //  留着反而会被 `reportUnusedDisableDirectives: error` 判为「未使用的禁用指令」而报错，故移除。）
       const response = await fetch(url, {
         method: 'POST',
         headers: {

@@ -45,6 +45,20 @@ const CHAIN_COOL = 400;
 const PAGE_TURN_MS_DESKTOP = 250;
 const PAGE_TURN_MS_MOBILE = 400;
 
+/**
+ * TTS 跟读的句级切分字符集。
+ * 切点规则（与旧写法 `split(/(?<=[。！？!?…]["」』”’)]?)/)` 等价，但不用 lookbehind
+ * —— lookbehind 在 iOS < 16.4 的正则解析期直接抛 SyntaxError，整个 main.js 会失效）：
+ * 在「句读符号之后」与「紧跟句读符号的收尾符号之后」切开。
+ */
+const SENTENCE_PUNCT = '。！？!?…';
+/**
+ * 收尾符号。注意**不含 `]`**：旧写法 `["」』”’)]?` 里那个 `]` 被正则引擎当作
+ * 「类结束 + 字面量 `]` + 可选量词」，而不是类成员，所以 `]` 从来没起过收尾作用
+ * （实测 `a。]b` 不会在 `]` 后切开）。这里按实测行为取集合，保持逐例等价。
+ */
+const CLOSING_MARK = '"」』”’)';
+
 /** 标注颜色（键持久化到书数据；值用于 overlayer 绘制） */
 export const HIGHLIGHT_COLORS: Record<string, string> = {
 	yellow: '#f2c14e',
@@ -753,7 +767,8 @@ export class EpubReaderView extends FileView {
 
 			this.loadedPath = file.path;
 			this.plugin.events.trigger('fleur-epub:book-opened');
-			console.log(`[FleurEPUB] 已打开：${file.basename}（指纹 ${this.fingerprint}）`);
+			// console.debug：审核规则只允许 warn / error / debug（console.log 会被判为多余日志）
+			console.debug(`[FleurEPUB] 已打开：${file.basename}（指纹 ${this.fingerprint}）`);
 		} catch (err) {
 			console.error('[FleurEPUB] 打开 EPUB 失败', err);
 			// 移动端无控制台：直接浮出错误信息（诊断用）
@@ -959,12 +974,26 @@ export class EpubReaderView extends FileView {
 		for (const el of blocks) {
 			const t = el.innerText?.replace(/\s+/g, ' ').trim();
 			if (!t) continue;
-			// 句级切分：按中英句读断句，跟读高亮粒度与微信读书对齐
-			const parts = t
-				.split(/(?<=[。！？!?…]["」』”’)]?)/)
-				.map((s) => s.trim())
-				.filter(Boolean);
-			for (const s of parts) {
+			// 句级切分：按中英句读断句，跟读高亮粒度与微信读书对齐。
+			// 不能用零宽 lookbehind 切分——lookbehind 在 iOS < 16.4 的正则解析期直接抛
+			// SyntaxError，整个 main.js 都会失效。这里改成等价的逐字符扫描：
+			// 切点在「句读符号之后」与「紧跟句读符号的收尾符号之后」，与原写法
+			// split(/(?<=[。！？!?…]["」』”’)]?)/) 逐步一致（已用差分测试逐例核对）。
+			// 收尾符号是单独成片（长度 1）的——下游「过短碎片并入前一句」正是靠这个把
+			// 「。」+「」」重新接回一句，不能在这里提前合并，否则断句粒度会变。
+			const parts: string[] = [];
+			let cut = 0;
+			for (let i = 0; i < t.length; i++) {
+				const ch = t[i];
+				if (SENTENCE_PUNCT.includes(ch) || (i > 0 && CLOSING_MARK.includes(ch) && SENTENCE_PUNCT.includes(t[i - 1]))) {
+					parts.push(t.slice(cut, i + 1));
+					cut = i + 1;
+				}
+			}
+			// 尾部残片无条件入列（可能为空串）：与 split 的行为对齐，空串由下面 filter 掉
+			parts.push(t.slice(cut));
+			const sentences = parts.map((s) => s.trim()).filter(Boolean);
+			for (const s of sentences) {
 				// 过短碎片（如引号残留）并入前一句，避免朗读碎片化
 				if (items.length && s.length < 2) {
 					items[items.length - 1].text += s;
@@ -2488,7 +2517,7 @@ export class EpubReaderView extends FileView {
 			// 空锚的 elText 为空、被启发式判成「非脚注」而跳转（红楼梦即此形态）。
 			let target = el;
 			const elText0 = (target.textContent ?? '').trim();
-			if (elText0.length === 0 || (elText0.length <= 4 && /[\d\*†‡§①-⑳]/.test(elText0))) {
+			if (elText0.length === 0 || (elText0.length <= 4 && /[\d*†‡§①-⑳]/.test(elText0))) {
 				const block = target.closest?.('p, li, dd, dt, blockquote') ?? target.parentElement;
 				if (block && !/^h[1-6]$/i.test(block.tagName)) target = block;
 			}
@@ -2537,7 +2566,7 @@ export class EpubReaderView extends FileView {
 		const elText = (el?.textContent ?? '').trim();
 		const markerLike = !!a?.querySelector?.('sup')
 			|| a?.parentElement?.tagName?.toLowerCase() === 'sup'
-			|| /[\d\*\u2020\u2021\u00a7\u2460-\u2473\u3251-\u325f\u32b1-\u32bf]/.test(refText);
+			|| /[\d*\u2020\u2021\u00a7\u2460-\u2473\u3251-\u325f\u32b1-\u32bf]/.test(refText);
 		const shortRef = refText.length > 0 && refText.length <= 8;
 		// 上限 1200：目标多为「提升后的注释父块」，长注释（如佛经注疏数百字）不应被误杀
 		const smallTarget = elText.length > 0 && elText.length <= 1200 && !/^h[1-6]$/i.test(el?.tagName ?? '');
@@ -2546,7 +2575,7 @@ export class EpubReaderView extends FileView {
 
 	/** 纯序号形态：「(1)」「[2]」「*」「①」等——说明锚点落在词典 dt / 独立标记节点上 */
 	private isMarkerOnlyText(t: string): boolean {
-		return /^[(\[]?[0-9*†‡§①-⑳]{1,4}[)\].。]?$/.test(t.replace(/\s+/g, ''));
+		return /^[([]?[0-9*†‡§①-⑳]{1,4}[)\].。]?$/.test(t.replace(/\s+/g, ''));
 	}
 
 	/** 提取脚注纯文本：按块级元素分段；剥掉回链小链接（↩ / 返回 / ↑ 等）避免噪声 */
@@ -2556,7 +2585,7 @@ export class EpubReaderView extends FileView {
 			clone.querySelectorAll('a[href]').forEach((x) => {
 				const t = (x.textContent ?? '').trim();
 				// 仅剥回链符号（↩ ↑ ← 返回 等）；普通链接（哪怕短）保文字去壳，不丢内容
-				if (!t || /^[↩↑←⟲⌂🔙\s]+$/.test(t) || t === '返回') x.remove();
+				if (!t || /^[↩↑←⟲⌂🔙\s]+$/u.test(t) || t === '返回') x.remove();
 				else x.replaceWith(...Array.from(x.childNodes));
 			});
 			// 嵌套脚注容器（<div id=n2>(2)…<div id=n3>…</div>…）：截掉带 id 的后续子块，只留本条
@@ -2582,7 +2611,7 @@ export class EpubReaderView extends FileView {
 					const e = n as Element;
 					if (e.hasAttribute('id') || e.hasAttribute('name')) break;
 					// 内联壳（span/sup 等）：剥回链符号后并入
-					out += (e.textContent ?? '').replace(/[↩↑←⟲⌂🔙]/g, '');
+					out += (e.textContent ?? '').replace(/[↩↑←⟲⌂🔙]/gu, '');
 				} else {
 					out += n.textContent ?? '';
 				}
@@ -2592,7 +2621,7 @@ export class EpubReaderView extends FileView {
 		};
 		// 序号分段：提取结果含多条脚注（无 id 平铺容器）时，按引用序号切出对应条目
 		const sliceByMarker = (full: string, want: number): string | null => {
-			const ms = Array.from(full.matchAll(/[(（\[]?(\d{1,3})[)）\].、．]/g));
+			const ms = Array.from(full.matchAll(/[(（[]?(\d{1,3})[)）\].、．]/g));
 			if (ms.length < 2) return null;
 			const nums = ms.map((m) => parseInt(m[1]!, 10));
 			const idx = nums.indexOf(want);

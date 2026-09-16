@@ -168,7 +168,9 @@ export class TTSPlayerModal extends Modal {
 
 	/** 标题栏拖拽移动窗口（桌面端）：transform 累积偏移，松手落位，重开自动复位 */
 	private setupDrag(): void {
-		this.modalEl.style.transform = '';
+		// 复位 transform：setCssProps 底层就是 style.setProperty，传空串即移除该属性，
+		// 与直接写 this.modalEl.style.transform = '' 完全等价。
+		this.modalEl.setCssProps({ transform: '' });
 		let ox = 0;
 		let oy = 0;
 		this.titleEl.addEventListener('pointerdown', (e) => {

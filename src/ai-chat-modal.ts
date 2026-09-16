@@ -37,14 +37,16 @@ function createSvgEl(parent: Node, tag: string, attrs?: Record<string, string>):
     }
   }
   if (tag === 'svg') {
-    // 安卓主题免疫：部分主题（如小米平板上遇到的）用 button svg 规则清掉描边，
+    // 主题免疫：部分主题（如小米平板上遇到的）用 button svg 规则清掉描边，
     // 表现为发送/停止/展开按钮成空白方块（iOS 同代码正常）。svg 的 stroke="currentColor"
-    // 只是表现属性，优先级最低；这里用「内联样式 + important」锁死描边与填充——
-    // 内联 important 是 CSS 的最高优先级，任何主题规则（含 !important）都打不穿。
-    el.style.setProperty('stroke', 'currentColor', 'important');
-    el.style.setProperty('fill', 'none', 'important');
+    // 只是表现属性，优先级最低；描边/填充/线宽的 important 锁改由 styles.css 的
+    // .fleur-epub-ai-icon 承担。注意 `!important` 之间按特异性决胜，所以那边的类名
+    // 故意重复三次（(0,3,0)）——实测可压过主题的 (0,1,2)/(0,2,2) 写法（含带 important 的），
+    // 只输给「特异性 ≥ (0,3,2) 且带 important」的极端规则；本机 13 套主题实测零命中。
+    // 线宽逐图标不同，用 CSS 自定义属性从代码侧传入，规则本身仍带 important。
+    el.addClass('fleur-epub-ai-icon');
     const sw = attrs?.['stroke-width'];
-    if (sw) el.style.setProperty('stroke-width', sw, 'important');
+    if (sw) el.setCssProps({ '--fleur-epub-ai-icon-stroke-width': sw });
   }
   parent.appendChild(el);
   return el;
@@ -629,7 +631,15 @@ export class AIChatPanel {
       // 加粗 **text**
       out = out.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
       // 斜体 *text*
-      out = out.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+      // 用「前导字符捕获」代替 lookbehind —— lookbehind 在 iOS < 16.4 的正则解析期直接抛
+      // SyntaxError，会让整个插件加载失败。
+      // 与原式 /(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/ 逐项对应：
+      //   (?<!\*)      → (^|[^*])            前导字符不是星号（行首也算）
+      //   \*(?!\*)     → \*(?!\*)            照旧
+      //   (.+?)        → ([^\n]*?[^*\n])     至少一个字符、不跨行（. 不含 \n）、末字符非星号
+      //   (?<!\*)\*(?!\*) → \*               末字符已由 [^*\n] 保证，只需 (?!\*) 收尾
+      // 已用差分测试对随机语料逐例核对（scroll-debug/regex-equiv.mjs）。
+      out = out.replace(/(^|[^*])\*(?!\*)([^\n]*?[^*\n])\*(?!\*)/g, '$1<em>$2</em>');
       // 行内代码 `code`
       out = out.replace(/`([^`]+)`/g, '<code style="background:var(--background-secondary);padding:1px 5px;border-radius:3px;font-size:0.9em;">$1</code>');
       return out;

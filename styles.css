@@ -1507,6 +1507,26 @@ body.fleur-epub-mobile .fleur-epub-annquick-icon svg {
 	color: var(--text-faint);
 }
 
+/*
+ * AI 面板图标的「主题免疫」锁。
+ * 背景：部分安卓主题（小米平板上遇到过）用 `button svg` 规则清掉描边，表现为发送 /
+ * 停止 / 展开按钮成空白方块（iOS 同代码正常）。svg 的 stroke="currentColor" 只是表现
+ * 属性，优先级最低，会被主题规则盖掉。
+ * 这里用「类 + important」把描边 / 填充 / 线宽锁死。重要：`!important` 之间按特异性
+ * 决胜，所以类名**故意重复三次**把特异性提到 (0,3,0)，用于压过常见的主题写法
+ * （`.theme-dark button svg` = (0,1,2)、`.theme .wrap button svg` = (0,2,2) 等）。
+ * 实测：主题不带 important → 稳赢；主题带 important 且特异性 ≤ (0,2,2) → 仍赢；
+ * 仅当主题用「important 且特异性 ≥ (0,3,2)」（约等于 3 层类 + 2 层标签）的极端选择器时
+ * 才可能被覆盖——本机 13 套主题实测对图标零命中。
+ * 线宽逐图标不同，由代码侧经自定义属性传入，规则本身仍带 important
+ * （见 ai-chat-modal.ts 的 createSvgEl）。改动原因与对照实验见 0.2.25 发布说明。
+ */
+.fleur-epub-ai-icon.fleur-epub-ai-icon.fleur-epub-ai-icon {
+	stroke: currentColor !important;
+	fill: none !important;
+	stroke-width: var(--fleur-epub-ai-icon-stroke-width, 2) !important;
+}
+
 /* AI 生成中 */
 .fleur-epub-ai-loading {
 	display: flex;

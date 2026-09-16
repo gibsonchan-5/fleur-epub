@@ -70,7 +70,7 @@ const TRANSLATE_SYSTEM_PROMPT = `你是专业的书籍翻译。对用户给出�
 /** 文言译文标记（模型输出前缀，插入 DOM 前剥掉、转成样式类） */
 const CLASSICAL_MARK = '〔古〕';
 /** 宽容匹配模型可能换用的括号形态：〔古〕【古】[古] 等 */
-const CLASSICAL_MARK_RE = /^[〔\[【]\s*古\s*[〕\]】]\s*/;
+const CLASSICAL_MARK_RE = /^[〔[【]\s*古\s*[〕\]】]\s*/;
 
 /**
  * 剥掉文言标记，返回是否文言译文与纯译文文本。

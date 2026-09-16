@@ -62,8 +62,10 @@ export default class FleurEpubPlugin extends Plugin {
 		// 背景：真机开书空白且无任何报错，移动端又看不到控制台，需把错误浮到 Notice。
 		// 普通使用不再弹启动探针；真实错误仍会浮出（同一错误只提示一次，避免刷屏）。
 		if (Platform.isMobile && this.settings.mobileDebug) {
-			const ua = /Chrome\/(\S+)/.exec(navigator.userAgent)?.[1] ?? '未知 WebView';
-			new Notice(`[FleurEPUB ${this.manifest.version}] WebView: ${ua}`, 5000);
+			// 平台名取自 Platform API —— 审核规则禁止用 navigator 探测运行环境。
+			// 这条只是「移动端调试模式」下的诊断提示，不参与任何功能判断。
+			const env = Platform.isIosApp ? 'iOS' : Platform.isAndroidApp ? 'Android' : 'Mobile';
+			new Notice(`[FleurEPUB ${this.manifest.version}] ${env}`, 5000);
 		}
 		if (Platform.isMobile) {
 			const reported = new Set<string>();
@@ -159,7 +161,9 @@ export default class FleurEpubPlugin extends Plugin {
 				data.fingerprint = newFp;
 				await adapter.write(target, JSON.stringify(data, null, 2));
 				await adapter.remove(path);
-				console.log('[FleurEPUB] 指纹迁移完成', path, '→', target);
+				// console.debug：审核规则只允许 warn / error / debug（console.log 会被判为多余日志），
+				// 换级别不丢信息，仍可在开发者控制台看到。
+				console.debug('[FleurEPUB] 指纹迁移完成', path, '→', target);
 			} catch (e) {
 				console.warn('[FleurEPUB] 指纹迁移失败', path, e);
 			}
