@@ -2603,3 +2603,59 @@ body.fleur-epub-mobile .fleur-epub-shelf-card-pct {
 	font-variant-numeric: tabular-nums;
 	min-height: 11px;
 }
+
+
+/* ══════════════════════════════════════════════
+   textarea 输入防闪（中文 IME 组词时底色灰白跳动）
+   ═══════════════════════════════════════════════
+   根因不在本插件：Obsidian 核心 app.css 有全局规则
+
+     @media (hover: hover) {
+       textarea:hover, input[type='text']:hover, ... {
+         background-color: var(--background-modifier-form-field-hover);
+         border-color: var(--background-modifier-border-hover);
+         transition: ...;
+       }
+     }
+
+   中文输入法首次进入 composition 合成状态时，Chromium 的 :hover 伪类会短暂抖动，反复触发
+   textarea 底色在「插件自身设定的 --background-primary」与 --background-modifier-form-field-hover
+   之间切换 —— 观感即「打中文时开头几个字底色灰白来回闪」。英文输入不触发。
+   实测（Playwright + 真实 app.css / 主题 CSS）：默认主题浅色下两值恰好相同故不可见；
+   默认主题深色（#1e1e1e ↔ #2a2a2a）与 ITS Theme（#f8fbff ↔ rgba(208,221,239,.384)）均会显形。
+
+   只锁「颜色值」本身，不动 transition（避免顺带改掉批注框焦点环的渐显动效）、
+   不动字号/行高/内距/圆角，也不动焦点色。
+
+   两条约束：
+   ① 只锁下面这 3 个「自身设了 background: var(--background-primary)」的 textarea。
+      检索框等未覆盖背景的元素静止底色本就等于核心 form-field，实测稳定，不动。
+   ② 边框锁一律带 :not(:focus)，避免压掉各输入框既有的 accent 焦点色与焦点环。
+   ═══════════════════════════════════════════════ */
+
+/* ── 基础恒定性：底色固定为插件自身取值 ── */
+.fleur-ai-input,
+.fleur-epub-annpop-input,
+.fleur-epub-editor-textarea {
+	background-color: var(--background-primary) !important;
+}
+
+/* ── hover / active 锁死（不随鼠标抖动换底色） ── */
+.fleur-ai-input:hover,
+.fleur-ai-input:active,
+.fleur-epub-annpop-input:hover,
+.fleur-epub-annpop-input:active,
+.fleur-epub-editor-textarea:hover,
+.fleur-epub-editor-textarea:active {
+	background-color: var(--background-primary) !important;
+}
+
+/* ── hover / active 边框同样锁住（排除聚焦态） ── */
+.fleur-ai-input:hover:not(:focus),
+.fleur-ai-input:active:not(:focus),
+.fleur-epub-annpop-input:hover:not(:focus),
+.fleur-epub-annpop-input:active:not(:focus),
+.fleur-epub-editor-textarea:hover:not(:focus),
+.fleur-epub-editor-textarea:active:not(:focus) {
+	border-color: var(--background-modifier-border) !important;
+}
