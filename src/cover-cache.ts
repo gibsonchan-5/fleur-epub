@@ -101,10 +101,19 @@ export class CoverCache {
 				const buf = await adapter.readBinary(this.imgPath(key));
 				url = `data:image/webp;base64,${arrayBufferToBase64(buf)}`;
 			}
-			const info: BookCoverInfo = { url, title: meta.title, author: meta.author, fingerprint: meta.fingerprint };
+			// 旧缓存缺指纹（本版之前生成）：必须先补齐再返回——书架排序与进度条都依赖
+			// 指纹，返回不完整会让首屏先按书名排、指纹稍后到达又重排一次（闪一下）。
+			// 补齐结果随手落盘 ⇒ 每本书只多解析一次，此后永远走缓存。
+			let fingerprint = meta.fingerprint;
+			if (!fingerprint) {
+				const md = await this.readMetadata(file).catch(() => null);
+				if (md) {
+					fingerprint = this.fpOf(md.identifier, md.title, md.author);
+					void this.persist(key, { url, title: meta.title, author: meta.author, fingerprint }, null);
+				}
+			}
+			const info: BookCoverInfo = { url, title: meta.title, author: meta.author, fingerprint };
 			this.mem.set(file.path, info);
-			// 旧缓存缺指纹（v1.1 前生成）：后台补一次元数据解析，补齐后通知书架刷新
-			if (!info.fingerprint) this.backfillFingerprint(file);
 			return info;
 		}
 	} catch (e) {
@@ -114,66 +123,54 @@ export class CoverCache {
 	// ② 解析 EPUB：仅取 metadata 与封面图
 	let title = file.basename;
 	let author = '';
-	let identifier = '';
+	let fingerprint: string | undefined;
 	let url: string | null = null;
 	try {
-		const bytes = await this.app.vault.readBinary(file);
-		const fileObj = new File([bytes], file.name, { type: 'application/epub+zip' });
-		const book: any = await makeBook(fileObj);
-		const md = book?.metadata ?? {};
-		title = firstStr(md.title) || file.basename;
-		author = firstStr(md.creator) || '';
-		identifier = firstStr(md.identifier);
-		const cover: Blob | null = (await book?.getCover?.()) ?? null;
+		const md = await this.readMetadata(file, true);
+		title = md.title;
+		author = md.author;
+		fingerprint = this.fpOf(md.identifier, title, author);
+		const cover: Blob | null = md.cover;
 		if (cover) {
 			const thumb = await this.makeThumb(cover);
 			if (thumb) {
 				url = await this.toDataUrl(thumb);
-				void this.persist(key, { url, title, author, fingerprint: this.fpOf(identifier, title, author) }, thumb);
+				void this.persist(key, { url, title, author, fingerprint }, thumb);
 			}
 		}
 	} catch (e) {
 		console.warn('[FleurEPUB] 解析封面失败', file.path, e);
 	}
 
-	const info: BookCoverInfo = { url, title, author, fingerprint: this.fpOf(identifier, title, author) };
+	const info: BookCoverInfo = { url, title, author, fingerprint };
 	this.mem.set(file.path, info);
 	if (!url) void this.persist(key, info, null);
 	return info;
 }
 
+	/**
+	 * 解析 EPUB 元数据（可选连封面一起取）。
+	 * withCover=false 时不调用 getCover()（解封面图不便宜），只补齐指纹时走这条。
+	 */
+	private async readMetadata(
+		file: TFile,
+		withCover = false,
+	): Promise<{ title: string; author: string; identifier: string; cover: Blob | null }> {
+		const bytes = await this.app.vault.readBinary(file);
+		const fileObj = new File([bytes], file.name, { type: 'application/epub+zip' });
+		const book: any = await makeBook(fileObj);
+		const md = book?.metadata ?? {};
+		return {
+			title: firstStr(md.title) || file.basename,
+			author: firstStr(md.creator) || '',
+			identifier: firstStr(md.identifier),
+			cover: withCover ? ((await book?.getCover?.()) ?? null) : null,
+		};
+	}
+
 	/** 由 metadata 组装书指纹（与 reader-view 打开书时的 computeFingerprint 同一算法） */
 	private fpOf(identifier: string, title: string, author: string): string {
 		return computeFingerprint({ identifier: identifier || undefined, title, creator: author });
-	}
-
-	/** 旧磁盘缓存缺指纹：补一次仅元数据的解析（不取封面），补齐后触发书架刷新 */
-	private backfillFingerprint(file: TFile): void {
-		void this.slot()
-			.then(async () => {
-				try {
-					const bytes = await this.app.vault.readBinary(file);
-					const fileObj = new File([bytes], file.name, { type: 'application/epub+zip' });
-					const book: any = await makeBook(fileObj);
-					const md = book?.metadata ?? {};
-					const title = firstStr(md.title) || file.basename;
-					const author = firstStr(md.creator) || '';
-					const identifier = firstStr(md.identifier);
-					const prev = this.mem.get(file.path);
-					const info: BookCoverInfo = {
-						url: prev?.url ?? null,
-						title,
-						author,
-						fingerprint: this.fpOf(identifier, title, author),
-					};
-					this.mem.set(file.path, info);
-					void this.persist(this.keyOf(file), info, null);
-					this.plugin.events?.trigger('fleur-epub:covers-updated');
-				} catch {
-					// 解析失败保持现状：书架卡片不显示进度
-				}
-			})
-			.finally(() => this.release());
 	}
 
 	/** Blob → data URL（自包含，不依赖 objectURL 生命周期） */
@@ -204,12 +201,17 @@ export class CoverCache {
 		}
 	}
 
-	/** 落盘：缩略图 + 书名/作者元信息（异步，不阻塞渲染） */
+	/** 落盘：缩略图 + 书名/作者/指纹元信息（异步，不阻塞渲染） */
 	private async persist(key: string, info: BookCoverInfo, thumb: Blob | null): Promise<void> {
 		try {
 			const adapter = this.app.vault.adapter;
 			if (!(await adapter.exists(this.dir()))) await adapter.mkdir(this.dir());
-			await adapter.write(this.metaPath(key), JSON.stringify({ title: info.title, author: info.author }));
+			// 指纹必须落盘：否则下次会话读缓存又缺指纹 → 又要解析一次 EPUB 才拿得到，
+			// 书架排序会被拖到「解析完才准」。
+			await adapter.write(
+				this.metaPath(key),
+				JSON.stringify({ title: info.title, author: info.author, fingerprint: info.fingerprint }),
+			);
 			if (thumb) await adapter.writeBinary(this.imgPath(key), await thumb.arrayBuffer());
 		} catch (e) {
 			console.warn('[FleurEPUB] 写入封面缓存失败', e);

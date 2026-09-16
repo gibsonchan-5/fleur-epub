@@ -1038,11 +1038,16 @@ export class Paginator extends HTMLElement {
         // FIXME: vertical-rl only, not -lr
         if (this.scrolled && this.#vertical) offset = -offset
         if ((reason === 'snap' || smooth) && this.hasAttribute('animated')) {
-            // fleur-epub patch: 点按/程序翻页（reason 'page'）用 ease-in-out + 400ms，
-            // 观感更顺滑；手势松手 snap 保持 ease-out 300ms（贴合手指初速度更自然）
+            // fleur-epub patch: 点按/程序翻页（reason 'page'）用 ease-in-out，
+            // 观感更顺滑；手势松手 snap 保持 ease-out 300ms（贴合手指初速度更自然）。
+            // 时长由宿主用属性 page-turn-ms 下发（桌面调短、移动端保持柔顺）；
+            // 缺省 400 = 移动端手感，属性缺失时行为与旧版一致。
             const isPageTurn = reason === 'page'
+            const turnMs = isPageTurn
+                ? (Number(this.getAttribute('page-turn-ms')) || 400)
+                : 300
             return animate(
-                element[scrollProp], offset, isPageTurn ? 400 : 300,
+                element[scrollProp], offset, turnMs,
                 isPageTurn ? easeInOutCubic : easeOutQuad,
                 x => element[scrollProp] = x,
             ).then(() => {

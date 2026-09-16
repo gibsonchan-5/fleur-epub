@@ -36,6 +36,15 @@ const EDGE_CHAIN_ACC = 300;
 /** 跨章冷却：翻章后短暂冷却，防止短章节落位前被二次触发连翻两章 */
 const CHAIN_COOL = 400;
 
+/**
+ * 翻页动画时长（ms，仅 effect 分页模式下点按/键盘/滚轮的程序翻页）。
+ * 桌面用指针与键盘连翻，缓起（ease-in-out）的起步阶段会被读成「迟钝」→ 调短；
+ * 移动端点按是唯一翻页方式，保留长一点的时长换取更柔顺的手感。
+ * 值经 `page-turn-ms` 属性下发给 paginator（见 applyFlow / paginator #scrollTo）。
+ */
+const PAGE_TURN_MS_DESKTOP = 250;
+const PAGE_TURN_MS_MOBILE = 400;
+
 /** 标注颜色（键持久化到书数据；值用于 overlayer 绘制） */
 export const HIGHLIGHT_COLORS: Record<string, string> = {
 	yellow: '#f2c14e',
@@ -640,10 +649,13 @@ export class EpubReaderView extends FileView {
 				this.showAnnotationViewer(ann, dhost.x, dhost.y);
 			});
 
-			// 书内链接接管（微信读书式）：先 preventDefault 拿下控制权，再异步分类——
-			// 脚注/尾注 → 内容卡片弹窗；其余链接 → 自行 goTo 保持跳转。
+			// 书内链接：移动端接管为「微信读书式脚注弹卡」——先 preventDefault 拿下控制权，
+			// 再异步分级（脚注/尾注 → 内容卡片弹窗；其余链接自行 goTo 保持跳转）。
 			// 不能放行默认跳转再异步弹卡，否则脚注会「跳转 + 弹卡」双触发。
+			// 桌面端不接管、不弹脚注卡：放行后由 foliate 自己 goTo(href)，
+			// 即原有的定向锚点跳转（滚动 / 翻页两种模式表现一致）。
 			view.addEventListener('link', (e: CustomEvent) => {
+				if (!isMobileUI(this.plugin)) return;
 				e.preventDefault();
 				void this.handleBookLink(e.detail?.a, e.detail?.href);
 			});
@@ -882,6 +894,12 @@ export class EpubReaderView extends FileView {
 			// 翻页模式启用平滑翻页动画
 			if (flow === 'paginated') renderer.setAttribute('animated', '');
 			else renderer.removeAttribute('animated');
+			// 程序翻页（点按 / 键盘 / 滚轮）的动画时长按平台下发：桌面调短（指针连翻更跟手），
+			// 移动端保留柔顺时长。手势松手的 snap 动画不受此值影响。
+			renderer.setAttribute(
+				'page-turn-ms',
+				String(isMobileUI(this.plugin) ? PAGE_TURN_MS_MOBILE : PAGE_TURN_MS_DESKTOP),
+			);
 			this.applyColumnLayout();
 		}
 		this.modeBtnScroll.toggleClass('is-active', flow === 'scrolled');

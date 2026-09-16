@@ -71,6 +71,14 @@ export function computeFingerprint(meta: BookMeta): string {
 }
 
 export class BookStore {
+	/**
+	 * 进度索引：指纹 → progress 快照（很小）。
+	 * 书架排序要每本书的 updatedAt、每张卡片要 percent；若直接 load() 就是 N 次读盘 +
+	 * N 次整本 JSON 反序列化（翻译缓存可能很大）。只缓存这几个字段，写入时同步更新
+	 * ⇒ 同一会话内书架排序与进度条零读盘。
+	 */
+	private progressIndex = new Map<string, BookProgress>();
+
 	constructor(private app: App, private plugin: Plugin) {}
 
 	private dir(): string {
@@ -93,7 +101,20 @@ export class BookStore {
 		}
 	}
 
+	/** 只取进度（书架排序 / 卡片进度条用）：命中索引直接返回，否则读一次盘并记住。
+	 *  返回的是副本——调用方改动返回值不会污染索引。 */
+	async loadProgress(fingerprint: string): Promise<BookProgress> {
+		const hit = this.progressIndex.get(fingerprint);
+		if (hit) return { ...hit };
+		const data = await this.load(fingerprint);
+		const progress: BookProgress = { ...(data?.progress ?? {}) };
+		this.progressIndex.set(fingerprint, progress);
+		return { ...progress };
+	}
+
 	async save(data: BookData): Promise<void> {
+		// 先更新索引再落盘：即便写失败，本次会话内的排序/进度条也按最新值走
+		this.progressIndex.set(data.fingerprint, { ...(data.progress ?? {}) });
 		try {
 			const adapter = this.app.vault.adapter;
 			if (!(await adapter.exists(this.dir()))) {

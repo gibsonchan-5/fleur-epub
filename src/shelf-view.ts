@@ -102,8 +102,12 @@ export class ShelfView extends ItemView {
 	private searchInputEl!: HTMLInputElement;
 	private searchResults: SearchResultItem[] = [];
 	private searching = false;
-	/** 最近打开时间缓存：path → progress.updatedAt（0 = 未读/未知），用于书架排序 */
+	/** 最近打开时间：path → progress.updatedAt（0 = 未读/未知），用于书架排序 */
 	private recentOpenMap = new Map<string, number>();
+	/** 排序表是否已就绪；未就绪时书架先占位、不落笔（见 paintShelf） */
+	private recentWarm = false;
+	/** 渲染序号：异步定序期间又来了新的渲染请求时，旧的那次作废 */
+	private shelfPaintSeq = 0;
 
 	constructor(leaf: WorkspaceLeaf, private plugin: FleurEpubPlugin) {
 		super(leaf);
@@ -145,12 +149,6 @@ export class ShelfView extends ItemView {
 		this.registerEvent(
 			this.plugin.events.on('fleur-epub:annotations-changed', () => {
 				if (this.mode === 'book' && this.tab === 'ann') this.renderList();
-			}),
-		);
-		// 封面缓存补齐指纹（旧缓存后台回填）→ 书架重渲染以显示进度
-		this.registerEvent(
-			this.plugin.events.on('fleur-epub:covers-updated', () => {
-				if (this.mode === 'shelf') this.renderShelf();
 			}),
 		);
 
@@ -252,20 +250,44 @@ export class ShelfView extends ItemView {
 
 	// ── 书架 ──
 
+	/** 书架渲染入口：排序要读数据，交给异步的「先定序、后落笔」流程 */
 	private renderShelf(): void {
-		this.listEl.empty();
-		this.listEl.toggle(true);
-		this.emptyEl.toggle(false);
+		const seq = ++this.shelfPaintSeq;
+		void this.paintShelf(seq);
+	}
+
+	/**
+	 * 书架落笔：**先把排序表算全，再一次性画出来**。
+	 *
+	 * 旧实现是先按当前（可能还是空的）表画一版，再异步回填、变了就整块重画——
+	 * 用户看到的是「书先按书名排好，稍后呼啦一下换位」。改为定序在落笔之前，
+	 * 首屏只画一次，顺序从第一帧起就是最终顺序。
+	 * 表就绪后每轮渲染只是内存查表（BookStore 有进度索引），所以「每轮重新定序」
+	 * 的开销可忽略，同时还天然带上刚读完那本书的新时间，不必再靠重排刷新。
+	 */
+	private async paintShelf(seq: number): Promise<void> {
 		const files = this.app.vault
 			.getFiles()
 			// Windows 文件扩展名大小写不保真（.EPUB / .Epub 常见），统一小写比较
 			.filter((f) => f.extension.toLowerCase() === 'epub')
 			.filter((f) => !this.query || f.basename.toLowerCase().includes(this.query));
+
+		// 本会话首次定序要真读盘（旧缓存缺指纹时还要解析一次 EPUB 元数据）。
+		// 超过 150ms 才显示占位：快时不闪加载态，慢时不画错误顺序。
+		let busyTimer: number | null = null;
+		if (!this.recentWarm) busyTimer = window.setTimeout(() => this.showShelfBusy(), 150);
+		await this.fillRecentOpen(files);
+		if (busyTimer !== null) window.clearTimeout(busyTimer);
+		this.recentWarm = true;
+		// 定序期间又排了新的渲染（搜索输入 / vault 变化）→ 本次作废，落笔交给最新那次
+		if (seq !== this.shelfPaintSeq || this.mode !== 'shelf') return;
+
+		this.listEl.empty();
+		this.listEl.toggle(true);
+		this.emptyEl.toggle(false);
 		// 排序：最近打开优先（progress.updatedAt，读到即最近在读），未读/同时间的按书名
 		const lastOpen = (f: TFile) => this.recentOpenMap.get(f.path) ?? 0;
 		files.sort((a, b) => lastOpen(b) - lastOpen(a) || a.basename.localeCompare(b.basename));
-		// 异步回填最近打开时间（首次渲染可能还是字母序，回填后重排一次）
-		void this.fillRecentOpen(files);
 
 		if (files.length === 0) {
 			this.emptyEl.toggle(true);
@@ -282,33 +304,31 @@ export class ShelfView extends ItemView {
 		}
 	}
 
+	/** 首次定序期间的占位：宁可显示「整理中」，也不先画一版错的顺序（那是闪烁的来源） */
+	private showShelfBusy(): void {
+		this.listEl.empty();
+		this.listEl.toggle(true);
+		this.emptyEl.toggle(true);
+		this.emptyEl.setText('正在整理书架…');
+	}
+
 	/**
-	 * 异步回填每本书的最近打开时间（progress.updatedAt，读到即最近在读）。
-	 * 与上一轮结果比较，有变化才重排一次书架；无变化不触发渲染（防回填死循环）。
+	 * 重算每本书的最近打开时间（progress.updatedAt，读到即最近在读）。
+	 * 只赋值、不渲染：调用方（paintShelf）拿到完整表后才落笔。
 	 */
 	private async fillRecentOpen(files: TFile[]): Promise<void> {
 		const next = new Map<string, number>();
 		for (const file of files) {
-			const info = this.plugin.coverCache ? await this.plugin.coverCache.get(file) : null;
-			const fp = info?.fingerprint;
-			let t = 0;
-			if (fp) {
-				const data = await this.plugin.bookStore.load(fp);
-				t = data?.progress?.updatedAt ?? 0;
-			}
-			next.set(file.path, t);
-		}
-		let changed = next.size !== this.recentOpenMap.size;
-		if (!changed) {
-			for (const [path, t] of next) {
-				if (this.recentOpenMap.get(path) !== t) {
-					changed = true;
-					break;
-				}
-			}
+			const fp = await this.fingerprintOf(file);
+			next.set(file.path, fp ? (await this.plugin.bookStore.loadProgress(fp)).updatedAt ?? 0 : 0);
 		}
 		this.recentOpenMap = next;
-		if (changed && this.mode === 'shelf') this.renderShelf();
+	}
+
+	/** 文件 → 书指纹（封面缓存里带着；解析过就必然有值，无需再解析 EPUB） */
+	private async fingerprintOf(file: TFile): Promise<string | undefined> {
+		const info = this.plugin.coverCache ? await this.plugin.coverCache.get(file) : null;
+		return info?.fingerprint ?? undefined;
 	}
 
 	/**
@@ -351,20 +371,18 @@ export class ShelfView extends ItemView {
 		this.listEl.appendChild(card);
 	}
 
-	/** 卡片进度：依赖 cover-cache 的 fingerprint（旧缓存由其后台回填并触发重渲染） */
+	/** 卡片进度：指纹由 cover-cache 的 get() 保证完整（旧缓存会在其中就地补齐） */
 	private async loadCardProgress(
 		file: TFile,
 		fill: HTMLElement,
 		pct: HTMLElement,
 		card: HTMLElement,
 	): Promise<void> {
-		const info = this.plugin.coverCache ? await this.plugin.coverCache.get(file) : null;
+		const fp = await this.fingerprintOf(file);
 		if (!card.isConnected) return;
-		const fp = info?.fingerprint;
 		if (!fp) return;
-		const data = await this.plugin.bookStore.load(fp);
+		const p = (await this.plugin.bookStore.loadProgress(fp)).percent;
 		if (!card.isConnected) return;
-		const p = data?.progress?.percent;
 		if (typeof p === 'number' && p > 0) {
 			fill.style.width = `${Math.min(100, Math.max(3, Math.round(p)))}%`;
 			pct.setText(`${Math.round(p)}%`);
