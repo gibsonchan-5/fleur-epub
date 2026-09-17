@@ -2271,11 +2271,11 @@ body.fleur-epub-mobile .fleur-epub-appear-label {
 	line-height: 1.3;
 	white-space: nowrap;
 }
-/* 触控目标：面板内小按钮统一 32px 高 */
+/* 触控目标：面板内小按钮统一 26px 高（32px 在真机上显得笨重，回调） */
 body.fleur-epub-mobile .fleur-epub-appear-mini {
-	min-height: 32px;
-	padding: 6px 12px;
-	font-size: 13px;
+	min-height: 26px;
+	padding: 4px 10px;
+	font-size: 12.5px;
 }
 /* 档位行（字号 / 字重 / 首行）：等宽分段控件，全部铺满内容列、
    起点与终点同栅格对齐（真机实测 max-width:88px 会让 2 键行右侧空出 95pt） */
@@ -2284,15 +2284,20 @@ body.fleur-epub-mobile .fleur-epub-appear-row.is-seg {
 }
 body.fleur-epub-mobile .fleur-epub-appear-row.is-seg .fleur-epub-appear-mini {
 	flex: 1 1 0;
-	padding: 6px 0;
+	padding: 4px 0;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 }
-/* 字号行的中间数值段也参与等分（A− / 19 / A＋ 三段等宽） */
+/* 字号行的 A− / A＋ 是步进按钮，不做等分（数值夹在中间参与拉伸） */
+body.fleur-epub-mobile .fleur-epub-appear-row.is-seg .fleur-epub-appear-mini.is-step {
+	flex: 0 0 64px;
+}
+/* 字号行的中间数值段拉伸填空、居中显示（与滑杆行的数值同栅格） */
 body.fleur-epub-mobile .fleur-epub-appear-row.is-seg .fleur-epub-appear-value {
 	flex: 1 1 0;
 	min-width: 0;
+	text-align: center;
 }
 /* 滑杆：自绘 4px 轨道 + 24px 拇指（真机原生滑杆精度差、拇指过小）；
    touch-action:none 防止拖动被 sheet 的滚动劫持——这是「滑条基本无法操作」的主因。
@@ -2300,7 +2305,11 @@ body.fleur-epub-mobile .fleur-epub-appear-row.is-seg .fleur-epub-appear-value {
 body.fleur-epub-mobile .fleur-epub-appear-range {
 	-webkit-appearance: none;
 	appearance: none;
-	height: 28px;
+	/* 高度必须 = 拇指直径：WKWebView 里 thumb 相对 input 顶部定位、
+	   track 却在 input 内垂直居中，margin-top 居中法在 iOS 上会偏出半个拇指
+	   （真机实测 thumb 底部才碰到轨道）。input 高 = thumb 高 + margin 0，
+	   桌面 WebKit 同样成立，两端一致。 */
+	height: 24px;
 	margin: 0;
 	padding: 0;
 	background: transparent;
@@ -2316,11 +2325,21 @@ body.fleur-epub-mobile .fleur-epub-appear-range::-webkit-slider-thumb {
 	appearance: none;
 	width: 24px;
 	height: 24px;
-	margin-top: -10px;
+	/* Chromium / 桌面 WebKit：thumb 基准 = track 顶，标准居中公式 (track−thumb)/2
+	   （Playwright WebKit 26.6 + Chromium 参数扫描实测 mt=-12 → Δ=-0.2px 居中） */
+	margin-top: -12px;
 	border-radius: 50%;
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
 	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+}
+/* iOS WKWebView：thumb 基准 = input 顶（真机 0.2.30 实测 mt=-10 时 thumb 底部才碰到
+   轨道，偏上量 = track 在 input 内的居中偏移）。input 高 = thumb 高时 mt=0 即居中。
+   -webkit-touch-callout 只有 iOS Safari/WKWebView 匹配。 */
+@supports (-webkit-touch-callout: none) {
+	body.fleur-epub-mobile .fleur-epub-appear-range::-webkit-slider-thumb {
+		margin-top: 0;
+	}
 }
 
 /* ── M4 补全：移动端批注 sheet 的「导出笔记」按钮 ──

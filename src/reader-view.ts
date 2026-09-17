@@ -2081,6 +2081,8 @@ export class EpubReaderView extends FileView {
 		sizeRow.addClass('is-seg');
 		const mkStepBtn = (text: string, fn: () => void) => {
 			const b = sizeRow.createEl('button', 'fleur-epub-appear-mini');
+			// is-step：移动端不做等分、固定小方块（A± 是步进键不是档位）
+			b.addClass('is-step');
 			b.setText(text);
 			b.addEventListener('click', fn);
 			return b;
