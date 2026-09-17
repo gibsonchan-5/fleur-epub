@@ -18,6 +18,7 @@ import { isMobileUI } from './platform';
 import { outerGapAttrs } from './outer-gap';
 import { spacingCss, LETTER_SPACING_DEFAULT, LETTER_SPACING_MAX, WORD_SPACING_DEFAULT, WORD_SPACING_MIN, WORD_SPACING_MAX } from './spacing';
 import { MobileChrome } from './mobile-chrome';
+import { matchCatalogFont, FontLibraryModal, type CatalogFont } from './font-library';
 import { ReaderTTS } from './tts';
 import { TTSPlayerModal } from './tts-player';
 import '../vendor/foliate-js/view.js';
@@ -1196,7 +1197,21 @@ export class EpubReaderView extends FileView {
 		const dark = s.theme === 'dark';
 		const bodyFont = s.fontFamily || this.resolveDefaultFont();
 		// 跟随 Obsidian 时须把宿主 @font-face 一并注入，iframe 内才有字体本体可用
-		const fontFaces = s.fontFamily ? '' : this.collectFontFaceCss(bodyFont);
+		let fontFaces = s.fontFamily ? '' : this.collectFontFaceCss(bodyFont);
+		// 在线字体库字体：iframe 是 srcdoc（opaque origin），app:// URL 不可靠，
+		// 沿用 base64 data URI 管线注入 @font-face（见 font-library.ts）。
+		// 首次未命中缓存时后台加载、就绪后重排（期间先按栈回退段渲染）。
+		const catalogFont = s.fontFamily ? matchCatalogFont(s.fontFamily) : null;
+		if (catalogFont) {
+			const cached = this.plugin.fontLibrary.getCachedFaceCss(catalogFont);
+			if (cached) {
+				fontFaces = cached;
+			} else {
+				void this.plugin.fontLibrary.loadFaceCss(catalogFont).then((css) => {
+					if (css) this.applyReaderStyles();
+				});
+			}
+		}
 		// 合成字重：多数中文字体（含大量 EPUB 内嵌字体）只提供「常规 / 粗」两个字面，
 		// 单靠 font-weight 时 300 与 500 都回退到 400，档位看不出差别。
 		// 这里叠加 -webkit-text-stroke 做笔画增减：细档用背景色侵蚀笔画变细，
@@ -2015,6 +2030,19 @@ export class EpubReaderView extends FileView {
 				opt.textContent = f.label;
 				fontSel.appendChild(opt);
 			}
+			// 在线字体库：已下载的开源字体（base64 @font-face 注入书内 iframe）
+			const downloadedFonts = this.plugin.fontLibrary.downloaded;
+			if (downloadedFonts.length) {
+				const group = document.createElement('optgroup');
+				group.label = '在线字体库';
+				for (const cf of downloadedFonts as CatalogFont[]) {
+					const opt = document.createElement('option');
+					opt.value = cf.stack;
+					opt.textContent = cf.label;
+					group.appendChild(opt);
+				}
+				fontSel.appendChild(group);
+			}
 			if (scannedFonts.length) {
 				const group = document.createElement('optgroup');
 				group.label = '本机字体';
@@ -2036,9 +2064,25 @@ export class EpubReaderView extends FileView {
 			fontSel.value = s.fontFamily;
 		};
 		fillFontOptions();
+		// 面板打开时后台刷新已下载字体（下载/删除后列表同步），有变化则重填选项
+		const downloadedCountAtOpen = this.plugin.fontLibrary.downloaded.length;
+		void this.plugin.fontLibrary.refreshDownloaded().then((list) => {
+			if (list.length !== downloadedCountAtOpen) fillFontOptions();
+		});
 		fontSel.addEventListener('change', () => {
 			s.fontFamily = fontSel.value;
 			persist();
+		});
+		const libBtn = fontRow.createEl('button', 'fleur-epub-appear-mini');
+		libBtn.setText('字体库');
+		libBtn.setAttribute('aria-label', '在线字体库：下载开源字体');
+		libBtn.addEventListener('click', () => {
+			new FontLibraryModal(this.plugin, () => {
+				void this.plugin.fontLibrary.refreshDownloaded().then(() => {
+					fillFontOptions();
+					this.applyReaderStyles();
+				});
+			}).open();
 		});
 		const scanBtn = fontRow.createEl('button', 'fleur-epub-appear-mini');
 		scanBtn.setText('扫描本机');

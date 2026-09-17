@@ -7,6 +7,7 @@ import { CoverCache } from './cover-cache';
 import { DEFAULT_SETTINGS, FleurEpubSettingTab, type FleurEpubSettings } from './settings';
 import { EpubReaderView, VIEW_TYPE_EPUB } from './reader-view';
 import { ShelfView, VIEW_TYPE_SHELF } from './shelf-view';
+import { FontLibrary } from './font-library';
 import { installCompatPolyfills } from './compat';
 import {
 	hydrateSecrets,
@@ -30,6 +31,8 @@ export default class FleurEpubPlugin extends Plugin {
 	bookStore!: BookStore;
 	/** 书籍封面缓存（书架网格视图用） */
 	coverCache!: CoverCache;
+	/** 在线字体库（开源字体按需下载 / 缓存 / 注入） */
+	fontLibrary!: FontLibrary;
 	/** 插件内事件总线：阅读器 ↔ 侧边栏联动（批注变化 / 开书） */
 	events = new Events();
 
@@ -54,6 +57,7 @@ export default class FleurEpubPlugin extends Plugin {
 		await this.loadSettings();
 		this.bookStore = new BookStore(this.app, this);
 		this.coverCache = new CoverCache(this.app, this);
+		this.fontLibrary = new FontLibrary(this);
 
 		// 移动端标记类：真机移动端 / 桌面调试开关时挂到 body，移动端样式全部限定在该作用域下
 		applyMobileBodyClass(this);

@@ -2769,3 +2769,56 @@ body.fleur-epub-mobile .fleur-epub-shelf-card-pct {
 .fleur-epub-editor-textarea:active:not(:focus) {
 	border-color: var(--background-modifier-border) !important;
 }
+
+/* ── 在线字体库弹窗：目录项 = 信息（名称/元信息/来源） + 操作按钮 ── */
+.modal.fleur-epub-fontlib-modal {
+	width: min(480px, 94vw);
+}
+.fleur-epub-fontlib-hint {
+	margin: 0 0 8px;
+	color: var(--text-muted);
+	font-size: 12.5px;
+	line-height: 1.55;
+}
+.fleur-epub-fontlib-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 10px 0;
+	border-top: 1px solid var(--background-modifier-border);
+}
+.fleur-epub-fontlib-info {
+	min-width: 0;
+}
+.fleur-epub-fontlib-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text-normal);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.fleur-epub-fontlib-badge {
+	font-size: 11px;
+	font-weight: 500;
+	padding: 1px 7px;
+	border-radius: 9px;
+	color: var(--text-on-accent);
+	background: var(--interactive-accent);
+}
+.fleur-epub-fontlib-meta {
+	margin-top: 2px;
+	font-size: 12px;
+	color: var(--text-muted);
+	line-height: 1.5;
+}
+.fleur-epub-fontlib-link {
+	font-size: 12px;
+}
+.fleur-epub-fontlib-actions {
+	flex-shrink: 0;
+}
+.fleur-epub-fontlib-actions button {
+	min-width: 64px;
+}
