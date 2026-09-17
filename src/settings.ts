@@ -2,6 +2,7 @@ import { App, PluginSettingTab, Setting, DropdownComponent, Notice, requestUrl }
 import type FleurEpubPlugin from './main';
 import { PROMPT_PRESETS, getPromptPreset, getPresetPreview, isCustomPresetKey, ANNOTATION_DEFAULT_BASE_LIMIT, type PromptPresetKey } from './ai-prompts';
 import { applyMobileBodyClass } from './platform';
+import { collectFolderPaths } from './folders';
 import { ReaderTTS } from './tts';
 import { ONLINE_TTS_PRESETS } from './tts-online';
 
@@ -32,10 +33,35 @@ export interface FleurEpubSettings {
 	marginTop: number;
 	/** 下边距（px）：渲染器底部内边距，正文下方留白（与上边距独立） */
 	marginBottom: number;
+	/**
+	 * 左右外侧留白（%，foliate `gap` 属性）：0 = 正文顶满窗口，7 = 默认（现状）。
+	 *
+	 * 这是「左右边距滑块拉到底仍有一圈白边」的解药：面板里的左/右边距只能**加**
+	 * 在渲染器上，压不掉 foliate 内建的那圈（窄屏来自 `--_gap: 7%`，
+	 * 宽屏单栏主要来自 `--_max-inline-size: 720px` 的行宽上限）。
+	 * 宽屏下单靠 gap 压不动上限，故 applyOuterGap() 会同时按本值放宽行宽上限。
+	 */
+	outerGap: number;
 	/** 行距（行高倍数） */
 	lineHeight: number;
 	/** 段间距（em） */
 	paraSpacing: number;
+	/**
+	 * 字间距（em）：0 = 紧排，0.01 = 默认（改造前的硬编码值，逐像素不变）。
+	 *
+	 * 汉字方块字天然字面率高，适度字距能显著改善长文可读性；单位用 em 使字距
+	 * 随字号等比缩放。作用于 html 后由 body 与全部后代继承，h1 另加 .01em。
+	 */
+	letterSpacing: number;
+	/**
+	 * 单词间距（em）：0 = 默认（CSS `normal`），仅对含空格的拉丁文可见。
+	 *
+	 * 中文正文没有词间空格，此项对中文无影响；主要服务于英文原著、混排段落
+	 * 与双语对照译文。**可为负**（下限 −0.3em）：部分中文字体自带的拉丁空格过宽
+	 * （如京华老宋体 0.5em，是常规拉丁字体的两倍），英文词距会明显偏宽，需负值修正。
+	 * 0 时不输出该声明，保证默认态样式表与旧版字面一致。
+	 */
+	wordSpacing: number;
 	/** 首行排版：true = 首行缩进两字（默认）/ false = 首行顶格（不缩进） */
 	paraIndent: boolean;
 	/** 正文字体（CSS font-family 栈；'' = 跟随 Obsidian 全局文本字体） */
@@ -100,8 +126,11 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	marginRight: 0,
 	marginTop: 0,
 	marginBottom: 0,
+	outerGap: 7,
 	lineHeight: 1.9,
 	paraSpacing: 0.85,
+	letterSpacing: 0.01,
+	wordSpacing: 0,
 	paraIndent: true,
 	fontFamily: '',
 	fontWeight: 400,
@@ -224,19 +253,16 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 		// ── 笔记导出（对齐 fleur-pdf：扫描 vault 文件夹下拉选择，导出时自动建目录） ──
 		new Setting(containerEl).setName('笔记导出').setHeading();
 
-		// 扫描 vault 中的所有文件夹供选择（fleur-pdf 同款实现）
-		const folderSet = new Set<string>();
-		folderSet.add(''); // 根目录选项
-		this.app.vault.getAllLoadedFiles().forEach((file) => {
-			if (file.path.includes('/')) {
-				const parts = file.path.split('/');
-				let current = '';
-				for (let i = 0; i < parts.length - 1; i++) {
-					current = current ? `${current}/${parts[i]}` : parts[i];
-					folderSet.add(current);
-				}
-			}
-		});
+		// 直接枚举 vault 里的文件夹（**含空文件夹**），与 fleur-pdf 同款做法。
+		// ⚠️ 不要改回「从 getAllLoadedFiles 的路径反推祖先目录」——那个写法只能由后代
+		// 反推祖先，空文件夹（以及只含 .DS_Store 之类隐藏文件的文件夹）永远推不出来，
+		// 表现为「点击下拉看不到空文件夹」。两个漏点与真实数据实测见 src/folders.ts。
+		// getAllFolders() @since 1.6.6（本插件 minAppVersion 1.7.2），默认不含根目录，
+		// 所以根选项单独加。
+		const folderSet = new Set<string>(['']);
+		for (const p of collectFolderPaths(this.app.vault.getAllFolders().map((f) => f.path))) {
+			folderSet.add(p);
+		}
 
 		new Setting(containerEl)
 			.setName('导出文件夹')

@@ -2,7 +2,7 @@
 // M1：骨架 + foliate-js 渲染 + 进度记忆
 
 import { Events, Notice, Platform, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
-import { BookStore, computeFingerprint, type BookData } from './store';
+import { BookStore, computeFingerprint, isMainDataFileName, type BookData } from './store';
 import { CoverCache } from './cover-cache';
 import { DEFAULT_SETTINGS, FleurEpubSettingTab, type FleurEpubSettings } from './settings';
 import { EpubReaderView, VIEW_TYPE_EPUB } from './reader-view';
@@ -148,9 +148,14 @@ export default class FleurEpubPlugin extends Plugin {
 		if (!(await adapter.exists(dir))) return;
 		const list = await adapter.list(dir);
 		for (const path of list.files) {
-			if (!path.endsWith('.json')) continue;
+			// 只处理主文件 <指纹>.json；分域文件（<指纹>.progress.json / <指纹>.trans.json）
+			// 必须先按文件名排除，否则会被当成书数据解析而在里面找 book 字段 → 每次启动报错。
+			// 它们也不参与迁移：本迁移只服务 0.1.12 之前的单文件数据，早已迁移完毕。
+			const name = path.split('/').pop() ?? path;
+			if (!isMainDataFileName(name)) continue;
 			try {
 				const data = JSON.parse(await adapter.read(path)) as BookData;
+				if (!data || typeof data.fingerprint !== 'string' || !data.book) continue;
 				const newFp = computeFingerprint(data.book);
 				if (!newFp || newFp === data.fingerprint) continue;
 				const target = `${dir}/${newFp}.json`;

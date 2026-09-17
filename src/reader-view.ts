@@ -7,7 +7,7 @@
 
 import { EventRef, FileView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import type FleurEpubPlugin from './main';
-import { computeFingerprint, type BookData, type BookMeta, type EpubAnnotation, type AnnotationKind } from './store';
+import { computeFingerprint, liveAnnotations, isAnnotationDeleted, type BookData, type BookMeta, type EpubAnnotation, type AnnotationKind, type SaveOutcome, type SaveScope } from './store';
 import { Overlayer } from '../vendor/foliate-js/overlayer.js';
 import { AIChatPanel } from './ai-chat-modal';
 import { exportAnnotationsToNote } from './annotation-export';
@@ -15,6 +15,8 @@ import { cleanAnnotationText } from './text-utils';
 import { TranslationEngine, findParagraphEl, collectParagraphs } from './translator';
 import type { ReaderTheme } from './settings';
 import { isMobileUI } from './platform';
+import { outerGapAttrs } from './outer-gap';
+import { spacingCss, LETTER_SPACING_DEFAULT, LETTER_SPACING_MAX, WORD_SPACING_DEFAULT, WORD_SPACING_MIN, WORD_SPACING_MAX } from './spacing';
 import { MobileChrome } from './mobile-chrome';
 import { ReaderTTS } from './tts';
 import { TTSPlayerModal } from './tts-player';
@@ -582,7 +584,7 @@ export class EpubReaderView extends FileView {
 			this.saveTimer = null;
 		}
 		this.closeAppearancePanel();
-		if (this.bookData) await this.plugin.bookStore.save(this.bookData);
+		if (this.bookData) this.notifyCorrupt(await this.plugin.bookStore.save(this.bookData));
 	}
 
 	private async loadBook(file: TFile): Promise<void> {
@@ -651,7 +653,7 @@ export class EpubReaderView extends FileView {
 			// 移动端纯高亮/划线点按 → 清除动作卡（见 showAnnotationActionSheet）
 			view.addEventListener('show-annotation', (e: CustomEvent) => {
 				const { value, range } = e.detail ?? {};
-				const ann = this.bookData?.annotations.find((x) => x.cfi === value);
+				const ann = this.findLiveAnnotation((x) => x.cfi === value);
 				// 移动端：点按标注 → action sheet（查看 / 编辑 / 清除），替代桌面右键清除菜单语义；
 				// 侧边栏「定位标注」触发的 show-annotation 只闪位置，不弹 sheet
 				if (isMobileUI(this.plugin)) {
@@ -786,7 +788,7 @@ export class EpubReaderView extends FileView {
 	private initTranslator(): void {
 		this.translator = new TranslationEngine(this.plugin, {
 			getData: () => this.bookData,
-			save: () => this.saveBookData(),
+			save: () => this.saveBookData('translations'),
 			onNotice: (msg, timeout) => new Notice(msg, timeout ?? 2400),
 		});
 		this.translator.docsProvider = () =>
@@ -927,6 +929,8 @@ export class EpubReaderView extends FileView {
 		if (!renderer) return;
 		const count = this.plugin.settings.flow === 'paginated' ? this.plugin.settings.columns : 1;
 		renderer.setAttribute('max-column-count', String(count));
+		// 单栏 / 双栏对外侧留白的处理不同（双栏不可放宽行宽上限，否则会塌成单栏）
+		this.applyOuterGap();
 	}
 
 	/** 切换阅读模式（顶栏分段控件） */
@@ -1147,7 +1151,41 @@ export class EpubReaderView extends FileView {
 			// 滚动模式下则是上下各留出一条不随内容滚动的白边。
 			renderer.style.paddingTop = `${this.plugin.settings.marginTop ?? 0}px`;
 			renderer.style.paddingBottom = `${this.plugin.settings.marginBottom ?? 0}px`;
+			// 左右外侧留白：foliate 内建的那圈白边（面板里任何一项都压不掉）的解法
+			this.applyOuterGap(renderer);
 		}
+	}
+
+	/** 上次写入渲染器的外侧留白三元组：值未变则不重复 render（滑块 input 很密） */
+	private outerGapApplied: { gap: string; maxInline: string; columns: number } | null = null;
+
+	/**
+	 * 应用「外侧留白」（0–7%，默认 7 = 现状）。取值映射见 src/outer-gap.ts。
+	 *
+	 * 默认值 7 时两项属性输出与 foliate 原生默认严格一致 → 老用户升级后逐像素不变。
+	 */
+	applyOuterGap(renderer?: { setAttribute(n: string, v: string): void; render?(): void }): void {
+		const r = renderer ?? (this.foliateView?.renderer as unknown as typeof renderer);
+		if (!r?.setAttribute) return;
+		const s = this.plugin.settings;
+		const { gap, maxInline, columns } = outerGapAttrs(s.outerGap, {
+			flow: s.flow,
+			columns: s.columns,
+		});
+
+		// 先写属性再判断是否重复：setAttribute 写入相同值不触发回调，代价可忽略；
+		// 但渲染器元素可能是重建的（重开书）→ 元素上没有旧属性，必须每次都写。
+		r.setAttribute('gap', gap);
+		r.setAttribute('max-inline-size', maxInline);
+
+		const prev = this.outerGapApplied;
+		if (prev && prev.gap === gap && prev.maxInline === maxInline && prev.columns === columns) return;
+		this.outerGapApplied = { gap, maxInline, columns };
+
+		// `gap` 的 attributeChangedCallback 分支只写自定义属性、不触发重排
+		// （只有 flow / max-inline-size 会），滚动模式下 html padding 靠 render 才刷新。
+		// max-inline-size 分支内部已 render 一次，这里再调一次是幂等的。
+		r.render?.();
 	}
 
 	/** 微信读书 / Apple Books 风格排版 CSS（fontSize 为根字号，其余全 em 缩放） */
@@ -1171,6 +1209,9 @@ export class EpubReaderView extends FileView {
 				: w > 500
 					? `-webkit-text-stroke: 0.012em ${t.text};`
 					: '';
+		// 字间距 / 单词间距：仍挂在 body 上（与改造前的锚点一致，避免 EPUB 自带
+		// body font-size 时 em 解析基准漂移）；h1 用 calc 保持「标题比正文更疏」并跟随滑块。
+		const sp = spacingCss(s.letterSpacing, s.wordSpacing);
 		return `
 			${fontFaces}
 			/* text-size-adjust:100% —— iOS WebKit 的文字自动膨胀（font boosting）只作用于
@@ -1182,7 +1223,7 @@ export class EpubReaderView extends FileView {
 				font-weight: ${w};
 				${synthStroke}
 				line-height: ${s.lineHeight};
-				letter-spacing: .01em;
+				${sp.body}
 				color: ${t.text};
 				background: ${t.bg} !important;
 				text-align: justify;
@@ -1197,7 +1238,7 @@ export class EpubReaderView extends FileView {
 				text-align: left;
 				color: ${t.text};
 			}
-			h1 { font-size: 1.55em; margin: 2.4em 0 1.4em; letter-spacing: .02em; }
+			h1 { font-size: 1.55em; margin: 2.4em 0 1.4em; ${sp.h1} }
 			h2 { font-size: 1.3em; margin: 2em 0 1.1em; }
 			h3 { font-size: 1.12em; margin: 1.7em 0 .9em; }
 			h4, h5, h6 { font-size: 1em; margin: 1.5em 0 .8em; }
@@ -1386,7 +1427,7 @@ export class EpubReaderView extends FileView {
 			this.lastMouseHost = host;
 			const entry = (this.foliateView?.renderer?.getContents?.() ?? []).find((c: any) => c.doc === doc);
 			const [hitValue] = entry?.overlayer ? entry.overlayer.hitTest({ x: e.clientX, y: e.clientY }) : [];
-			const hitAnn = hitValue ? this.bookData?.annotations.find((x) => x.cfi === hitValue) : undefined;
+			const hitAnn = hitValue ? this.findLiveAnnotation((x) => x.cfi === hitValue) : undefined;
 			const sel = doc.getSelection();
 			if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
 				e.preventDefault();
@@ -1577,8 +1618,45 @@ export class EpubReaderView extends FileView {
 		return { x: r.left + x, y: r.top + y };
 	}
 
-	private saveBookData(): void {
-		if (this.bookData) void this.plugin.bookStore.save(this.bookData);
+	/** 落盘。默认只写批注域（主文件）——这个函数由 4 处标注增删改调用；
+	 *  译文缓存落盘复用同一入口，但显式传 'translations'（只写体积最大的那个域，
+	 *  不再顺手重写批注文件）。关书/切书的全量 flush 走 bookStore.save 的默认 'all'。
+	 *
+	 *  第二期：合并写可能把「别处同步进来的批注」吸收进来，落盘后要把它们增量挂到
+	 *  正文（不重绘，避免闪烁）并通知书架刷新计数。 */
+	private saveBookData(scope: SaveScope = 'annotations'): void {
+		if (!this.bookData) return;
+		const data = this.bookData;
+		void this.plugin.bookStore
+			.save(data, scope)
+			.then((r) => this.onSaveOutcome(data, r))
+			.catch((e) => console.warn('[FleurEPUB] 保存批注失败', e));
+	}
+
+	/** 处理落盘结果：吸收到外来批注 → 增量挂载 + 通知；遇到损坏文件 → 明确告知用户。 */
+	private onSaveOutcome(data: BookData, r: SaveOutcome): void {
+		// 书已切走/已关闭 → 本次结果与当前画面无关，不再动 UI
+		if (this.bookData !== data) return;
+
+		if (r.absorbed.length) {
+			const view = this.foliateView;
+			if (view) {
+				// addAnnotation 同 key 重绘即替换，只挂新增的那几条即可，不重绘已有标注
+				for (const a of r.absorbed) void view.addAnnotation({ value: a.cfi, ...a }).catch(() => {});
+			}
+			this.plugin.notifyAnnotationsChanged();
+		}
+
+		if (r.corruptBackup) this.notifyCorrupt(r);
+	}
+
+	/** 损坏保护的提示：落盘被放弃时必须让用户知道，否则表现成「批注存不上」且毫无线索。 */
+	private notifyCorrupt(r: SaveOutcome): void {
+		if (!r?.corruptBackup) return;
+		new Notice(
+			`数据文件损坏，已备份为 ${r.corruptBackup.split('/').pop()}，本次未覆盖原文件`,
+			8000,
+		);
 	}
 
 	/** 在当前选段上创建标注（选段 doc 由工具条记录，避免弹层期间选区漂移） */
@@ -1610,13 +1688,16 @@ export class EpubReaderView extends FileView {
 	/** 在既有 CFI 锚点上创建标注（AI「写入批注」复用：选区可能在点击时已塌缩） */
 	private async createAnnotationAt(cfi: string, text: string, kind: AnnotationKind, color: string,
 		comment?: string): Promise<EpubAnnotation> {
+		const now = Date.now();
 		const ann: EpubAnnotation = {
-			id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+			id: now.toString(36) + Math.random().toString(36).slice(2, 6),
 			cfi,
 			text,
 			kind,
 			color,
-			createdAt: Date.now(),
+			createdAt: now,
+			// 合并写按 updatedAt 取新；新建时等于 createdAt
+			updatedAt: now,
 		};
 		if (comment) ann.comment = comment;
 		this.bookData?.annotations.push(ann);
@@ -1648,10 +1729,15 @@ export class EpubReaderView extends FileView {
 		try {
 			await this.foliateView?.deleteAnnotation({ value: ann.cfi });
 		} catch { /* 忽略移除异常 */ }
+		// 第二期：不再把元素移出数组，而是打墓碑。
+		// 移出数组的话，另一端那条仍是「存活」的，同步过来合并取并集时会把它救回来
+		//（表现出来的现象是「删了的批注自己又回来了」）。墓碑由合并路径按 30 天回收。
 		const list = this.bookData?.annotations;
-		if (list) {
-			const i = list.findIndex((x) => x.id === ann.id);
-			if (i >= 0) list.splice(i, 1);
+		const target = list?.find((x) => x.id === ann.id);
+		if (target) {
+			const now = Date.now();
+			target.deletedAt = now;
+			target.updatedAt = now;
 		}
 		this.saveBookData();
 		this.plugin.notifyAnnotationsChanged();
@@ -2047,18 +2133,23 @@ export class EpubReaderView extends FileView {
 		}
 		renderIndent();
 
-		// ── 行距 / 段距 / 上下边距 / 左右边距：滑杆 + 数值 ──
+		// ── 行距 / 段距 / 上下边距 / 左右边距 / 外侧留白：滑杆 + 数值 ──
+		/** 「恢复默认排版」后把滑杆位置与数值重新同步回 get()（否则视觉停在旧值） */
+		const sliderSyncers: Array<() => void> = [];
 		const mkSlider = (
 			label: string, min: number, max: number, step: number,
 			get: () => number, set: (v: number) => void, fmt: (v: number) => string,
+			hint?: string,
 		) => {
 			const row = mkRow(label);
+			if (hint) row.setAttr('title', hint);
 			const slider = row.createEl('input', 'fleur-epub-appear-range');
 			slider.setAttr('type', 'range');
 			slider.setAttr('min', String(min));
 			slider.setAttr('max', String(max));
 			slider.setAttr('step', String(step));
 			slider.setAttr('value', String(get()));
+			if (hint) slider.setAttr('aria-label', hint);
 			const val = row.createSpan('fleur-epub-appear-value');
 			val.setText(fmt(get()));
 			slider.addEventListener('input', () => {
@@ -2067,15 +2158,47 @@ export class EpubReaderView extends FileView {
 				val.setText(fmt(v));
 				persist();
 			});
+			sliderSyncers.push(() => {
+				slider.value = String(get());
+				val.setText(fmt(get()));
+			});
 		};
 		mkSlider('行距', 1.4, 2.6, 0.05, () => s.lineHeight, (v) => (s.lineHeight = v), (v) => v.toFixed(2));
 		mkSlider('段距', 0, 2, 0.05, () => s.paraSpacing, (v) => (s.paraSpacing = v), (v) => `${v.toFixed(2)}em`);
+		// 字间距 / 单词间距：em 单位，随字号等比缩放。
+		// 字间距默认 0.01em = 改造前的硬编码值（逐像素不变），拉到 0 即紧排。
+		mkSlider(
+			'字间距', 0, LETTER_SPACING_MAX, 0.01,
+			() => s.letterSpacing ?? LETTER_SPACING_DEFAULT,
+			(v) => (s.letterSpacing = v),
+			(v) => `${v.toFixed(2)}em`,
+			'汉字之间额外加入的间距，随字号等比缩放。0.01em = 默认微字距，0 = 紧排；长文可适当加大到 0.05～0.1em',
+		);
+		// 单词间距：中文正文无词间空格，此项对中文不可见，主要作用于英文原著与对照译文。
+		// 收负值——部分中文字体自带的拉丁空格过宽（如京华老宋体 0.5em，是常规拉丁字体两倍），
+		// 需要负向修正；纯拉丁字体用户则应保持在 0 附近。
+		mkSlider(
+			'单词间距', WORD_SPACING_MIN, WORD_SPACING_MAX, 0.05,
+			() => s.wordSpacing ?? WORD_SPACING_DEFAULT,
+			(v) => (s.wordSpacing = v),
+			(v) => `${v.toFixed(2)}em`,
+			'单词之间额外加入的间距，仅对含空格的拉丁文可见（中文正文无词间空格，调此项看不到变化）。英文词距偏宽时可往左拉到负值修正（如 -0.10em），偏窄则往右拉',
+		);
 		// 上下边距：分别可调（原「页边距」是对称项，用户要求拆成上下两项）
 		mkSlider('上边距', 0, 120, 4, () => s.marginTop ?? 0, (v) => (s.marginTop = v), (v) => `${v}px`);
 		mkSlider('下边距', 0, 120, 4, () => s.marginBottom ?? 0, (v) => (s.marginBottom = v), (v) => `${v}px`);
 		// 左右边距：独立于对称页边距的额外偏移，可做不对称排版（如左 70 / 右 40）
 		mkSlider('左边距', 0, 80, 4, () => s.marginLeft ?? 0, (v) => (s.marginLeft = v), (v) => `${v}px`);
 		mkSlider('右边距', 0, 80, 4, () => s.marginRight ?? 0, (v) => (s.marginRight = v), (v) => `${v}px`);
+		// 外侧留白：foliate 内建的左右留白（窄屏 7%、宽屏单栏受 720px 行宽上限影响）。
+		// 左/右边距只能往上加，压不掉这一层；此项专治「都拉到 0 还有一圈白边」。
+		mkSlider(
+			'外侧留白', 0, 7, 0.5,
+			() => s.outerGap ?? 7,
+			(v) => (s.outerGap = v),
+			(v) => `${v}%`,
+			'左右两侧留白（占窗口宽度百分比）。7% = 默认，0% = 正文顶满窗口；宽屏下会自动放宽行宽上限以达成所选留白',
+		);
 
 		// 对照翻译开关已移至顶栏（与 Aa 并置），此处不再重复提供
 
@@ -2087,11 +2210,14 @@ export class EpubReaderView extends FileView {
 			s.fontSize = 16;
 			s.lineHeight = 1.9;
 			s.paraSpacing = 0.85;
+			s.letterSpacing = LETTER_SPACING_DEFAULT;
+			s.wordSpacing = WORD_SPACING_DEFAULT;
 			s.pageMargin = 36;
 			s.marginLeft = 0;
 			s.marginRight = 0;
 			s.marginTop = 0;
 			s.marginBottom = 0;
+			s.outerGap = 7;
 			s.fontFamily = '';
 			s.fontWeight = 400;
 			s.paraIndent = true;
@@ -2100,6 +2226,7 @@ export class EpubReaderView extends FileView {
 			renderSize();
 			renderWeight();
 			renderIndent();
+			sliderSyncers.forEach((sync) => sync());
 			panel.findAll('.fleur-epub-appear-swatch').forEach((d) => d.toggleClass('is-active', d.dataset.theme === 'light'));
 			persist();
 		});
@@ -2801,16 +2928,23 @@ export class EpubReaderView extends FileView {
 		}
 	}
 
-	/** 全部标注（侧边栏批注 tab） */
+	/** 全部标注（侧边栏批注 tab、导出笔记）—— 已过滤墓碑 */
 	getAnnotations(): EpubAnnotation[] {
-		return this.bookData?.annotations ?? [];
+		return liveAnnotations(this.bookData?.annotations);
+	}
+
+	/** 在现存标注里按条件查一条（自动跳过墓碑：删掉的批注不该再被点开/编辑） */
+	private findLiveAnnotation(pred: (a: EpubAnnotation) => boolean): EpubAnnotation | undefined {
+		return this.bookData?.annotations.find((x) => !isAnnotationDeleted(x) && pred(x));
 	}
 
 	/** 更新批注文字（侧边栏内联编辑 / AI 生成批注共用；comment 为 undefined 表示清除） */
 	async updateAnnotationComment(id: string, comment: string | undefined): Promise<void> {
-		const ann = this.bookData?.annotations.find((x) => x.id === id);
+		const ann = this.bookData?.annotations.find((x) => x.id === id && !isAnnotationDeleted(x));
 		if (!ann) return;
 		ann.comment = comment;
+		// 刷新 updatedAt，否则合并时这条改动会被判为「更旧」而丢掉
+		ann.updatedAt = Date.now();
 		this.saveBookData();
 		this.plugin.notifyAnnotationsChanged();
 	}
@@ -2826,7 +2960,7 @@ export class EpubReaderView extends FileView {
 			// 移动端：定位触发的 show-annotation 只闪位置，不弹 action sheet
 			this.locating = true;
 			await this.foliateView?.showAnnotation({ value: cfi });
-			const ann = this.bookData?.annotations.find((x) => x.cfi === cfi);
+			const ann = this.findLiveAnnotation((x) => x.cfi === cfi);
 			if (ann) this.flashAnnotation(ann);
 		} catch (err) {
 			console.warn('[FleurEPUB] 标注定位失败', err);
@@ -2910,7 +3044,8 @@ export class EpubReaderView extends FileView {
 				this.annMountTimer = window.setTimeout(attempt, 40);
 				return;
 			}
-			for (const a of this.bookData.annotations) {
+			// 墓碑必须排除：删掉的批注若仍被挂上，会「删完又出现」
+			for (const a of liveAnnotations(this.bookData.annotations)) {
 				void view.addAnnotation({ value: a.cfi, ...a }).catch(() => {});
 			}
 		};
@@ -2925,7 +3060,8 @@ export class EpubReaderView extends FileView {
 		if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
 		this.saveTimer = window.setTimeout(() => {
 			this.saveTimer = null;
-			if (this.bookData) void this.plugin.bookStore.save(this.bookData);
+			// 翻页只写 progress 域（几十字节）：绝不碰主文件，批注因此永不被翻页重写
+			if (this.bookData) void this.plugin.bookStore.save(this.bookData, 'progress');
 		}, 800);
 	}
 
@@ -2943,7 +3079,7 @@ export class EpubReaderView extends FileView {
 			this.annMountTimer = null;
 		}
 		if (this.bookData) {
-			await this.plugin.bookStore.save(this.bookData);
+			this.notifyCorrupt(await this.plugin.bookStore.save(this.bookData));
 			this.bookData = null;
 		}
 		try {

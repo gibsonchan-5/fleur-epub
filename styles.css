@@ -1714,11 +1714,34 @@ body.fleur-epub-mobile .fleur-epub-bar-btn-fs.is-active {
 }
 
 /* 沉浸全屏（body 类仅在我们的阅读视图激活期间挂载）：
-   隐藏 Obsidian 移动端顶部导航（平板 tab 头 / 手机 navbar / view 头） */
+   隐藏 Obsidian 移动端顶部导航（平板 tab 头 / 手机 navbar / view 头），
+   以及底部残留的宿主 chrome（旧版本 mobile-toolbar、状态栏），
+   否则沉浸后底部仍会留下一截宿主底色的空白。 */
 body.fleur-epub-immersive .mobile-tab-header,
 body.fleur-epub-immersive .mobile-navbar,
+body.fleur-epub-immersive .mobile-toolbar,
+body.fleur-epub-immersive .status-bar,
 body.fleur-epub-immersive .view-header {
 	display: none !important;
+}
+/* 沉浸下根元素已 fixed inset-0，宿主给视图容器留的上下内边距全部归零
+   （只清上下：左右由下面的 is-mobile 全宽规则统一处理） */
+body.fleur-epub-immersive .fleur-epub-root {
+	padding-top: 0 !important;
+	padding-bottom: 0 !important;
+}
+
+/* 真机移动端「两侧白边」：宿主会给视图容器留左右内边距，深色阅读主题下
+   两侧各露出一条宿主底色的竖条（真机截图实测每侧约 8px）。
+   阅读根元素背景是纸色，宿主的白边在它**外面** —— 所以清自身 padding 无用，
+   必须让根元素直接对齐视口左右边缘：50% − 50vw 在「父容器水平居中」时恒等于
+   抵消掉那层内边距所需的负外边距（移动端视图容器的常态）。
+   限定 body.is-mobile：桌面「移动端调试」下视图可能是分栏窄窗，套用会让内容溢出。
+   沉浸模式下根元素是 fixed，包含块即视口 → 50% 与 50vw 相等、外边距归零，无副作用。 */
+body.is-mobile.fleur-epub-mobile .fleur-epub-root {
+	max-width: none !important;
+	margin-left: calc(50% - 50vw) !important;
+	margin-right: calc(50% - 50vw) !important;
 }
 
 /* 顶栏：高度 48px，触控目标 ≥ 32px，间距收紧 */
