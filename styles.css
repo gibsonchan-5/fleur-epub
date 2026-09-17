@@ -785,7 +785,10 @@ body.fleur-epub-mobile .fleur-epub-annpop-input {
 /* 长尾注兜底：跳转到脚注原文位置（弱化文字按钮，subtle 不抢内容） */
 .fleur-epub-fnview-jump {
 	display: block;
-	width: 100%;
+	/* button 是替换型元素：width:auto = shrink-to-fit，不会像普通 block 那样拉伸；
+	   width:100% 又只等于包含块 content 宽，负 margin 只位移不增宽 → 分隔线右侧恒差 32px。
+	   用 calc(100% + 32px) 显式补回两侧 16px 负 margin，分隔线才能贯通贴到卡片两边。 */
+	width: calc(100% + 32px);
 	margin: 6px -16px -8px;
 	padding: 8px 16px;
 	border: none;
@@ -2274,17 +2277,22 @@ body.fleur-epub-mobile .fleur-epub-appear-mini {
 	padding: 6px 12px;
 	font-size: 13px;
 }
-/* 档位行（字重 / 首行）：等宽分段控件，宽度一致、起点对齐 */
+/* 档位行（字号 / 字重 / 首行）：等宽分段控件，全部铺满内容列、
+   起点与终点同栅格对齐（真机实测 max-width:88px 会让 2 键行右侧空出 95pt） */
 body.fleur-epub-mobile .fleur-epub-appear-row.is-seg {
 	gap: 6px;
 }
 body.fleur-epub-mobile .fleur-epub-appear-row.is-seg .fleur-epub-appear-mini {
 	flex: 1 1 0;
-	max-width: 88px;
 	padding: 6px 0;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
+}
+/* 字号行的中间数值段也参与等分（A− / 19 / A＋ 三段等宽） */
+body.fleur-epub-mobile .fleur-epub-appear-row.is-seg .fleur-epub-appear-value {
+	flex: 1 1 0;
+	min-width: 0;
 }
 /* 滑杆：自绘 4px 轨道 + 24px 拇指（真机原生滑杆精度差、拇指过小）；
    touch-action:none 防止拖动被 sheet 的滚动劫持——这是「滑条基本无法操作」的主因。

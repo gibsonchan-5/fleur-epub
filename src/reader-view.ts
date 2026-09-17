@@ -2077,6 +2077,8 @@ export class EpubReaderView extends FileView {
 
 		// ── 字号：− 值 ＋ 步进器（按 A− → 数值 → A＋ 顺序创建） ──
 		const sizeRow = mkRow('字号');
+		// is-seg：移动端三段等宽铺满（与其他分段行同栅格对齐）
+		sizeRow.addClass('is-seg');
 		const mkStepBtn = (text: string, fn: () => void) => {
 			const b = sizeRow.createEl('button', 'fleur-epub-appear-mini');
 			b.setText(text);
