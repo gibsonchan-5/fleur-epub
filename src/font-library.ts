@@ -183,7 +183,7 @@ export class FontLibrary {
 					await this.app.vault.adapter.writeBinary(this.pathOf(font), buf);
 					this.faceCache.delete(font.id);
 					await this.refreshDownloaded();
-					new Notice(`「${font.label}」下载完成，可在字体列表中选择`, 2500);
+					new Notice(`「${font.label}」下载完成，已自动应用`, 2500);
 					return true;
 				} catch {
 					// 换下一个源

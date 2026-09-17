@@ -18,7 +18,7 @@ import { isMobileUI } from './platform';
 import { outerGapAttrs } from './outer-gap';
 import { spacingCss, LETTER_SPACING_DEFAULT, LETTER_SPACING_MAX, WORD_SPACING_DEFAULT, WORD_SPACING_MIN, WORD_SPACING_MAX } from './spacing';
 import { MobileChrome } from './mobile-chrome';
-import { matchCatalogFont, FontLibraryModal, type CatalogFont } from './font-library';
+import { matchCatalogFont, FONT_CATALOG } from './font-library';
 import { ReaderTTS } from './tts';
 import { TTSPlayerModal } from './tts-player';
 import '../vendor/foliate-js/view.js';
@@ -2019,9 +2019,53 @@ export class EpubReaderView extends FileView {
 			}
 		}
 
-		// ── 字体：预置 + 本机扫描 + 自定义输入 ──
+		// ── 字体：预置 + 在线字体库 + 本机扫描 + 自定义输入 ──
 		const fontRow = mkRow('字体');
 		const fontSel = fontRow.createEl('select', 'fleur-epub-appear-select dropdown');
+		// 桌面端自绘下拉：原生 select 的弹出方向由系统决定（面板靠下时菜单向上弹，反直觉），
+		// 自绘列表默认向下展开（下方空间不足才向上翻折）。移动端保留原生 select（iOS 走
+		// 系统滚轮选择器，是移动端惯例）。
+		const useFontDD = !isMobileUI(this.plugin);
+		let ddTrigger: HTMLElement | null = null;
+		let ddPopup: HTMLElement | null = null;
+		let ddDismiss: ((ev: Event) => void) | null = null;
+		let ddTip: HTMLElement | null = null;
+		const hideFontTip = () => {
+			ddTip?.remove();
+			ddTip = null;
+		};
+		// 自绘全称提示：仅当元素文字确实被截断（ellipsis）时，在旁边浮出完整名称。
+		// 不用原生 title（Chromium 下延迟约 1s 且鼠标微动即取消，时有时无）、
+		// 不用 aria-label tooltip（Obsidian 内置 tooltip 对该弹层不生效，实测）。
+		const showFontTip = (el: HTMLElement, text: string) => {
+			hideFontTip();
+			if (el.scrollWidth <= el.clientWidth + 1) return;
+			const tip = document.body.createDiv('fleur-epub-fontdd-tip');
+			tip.setText(text);
+			tip.style.visibility = 'hidden';
+			const r = el.getBoundingClientRect();
+			const tw = tip.offsetWidth;
+			const th = tip.offsetHeight;
+			let left = r.right + 8;
+			if (left + tw > window.innerWidth - 8) left = Math.max(8, r.left - tw - 8);
+			let top = r.top + (r.height - th) / 2;
+			top = Math.min(Math.max(8, top), window.innerHeight - th - 8);
+			tip.style.left = `${left}px`;
+			tip.style.top = `${top}px`;
+			tip.style.visibility = '';
+			ddTip = tip;
+		};
+		const closeFontDD = () => {
+			hideFontTip();
+			ddPopup?.remove();
+			ddPopup = null;
+			if (ddDismiss) {
+				document.removeEventListener('pointerdown', ddDismiss, true);
+				document.removeEventListener('keydown', ddDismiss, true);
+				ddDismiss = null;
+			}
+			ddTrigger?.removeClass('is-open');
+		};
 		const fillFontOptions = () => {
 			fontSel.empty();
 			for (const f of PRESET_FONTS) {
@@ -2030,15 +2074,18 @@ export class EpubReaderView extends FileView {
 				opt.textContent = f.label;
 				fontSel.appendChild(opt);
 			}
-			// 在线字体库：已下载的开源字体（base64 @font-face 注入书内 iframe）
-			const downloadedFonts = this.plugin.fontLibrary.downloaded;
-			if (downloadedFonts.length) {
+			// 在线字体库：目录字体常驻下拉（微信读书式——未下载项标注状态，选中即下载）
+			{
 				const group = document.createElement('optgroup');
 				group.label = '在线字体库';
-				for (const cf of downloadedFonts as CatalogFont[]) {
+				for (const cf of FONT_CATALOG) {
 					const opt = document.createElement('option');
 					opt.value = cf.stack;
-					opt.textContent = cf.label;
+					opt.textContent = this.plugin.fontLibrary.downloading.has(cf.id)
+						? `${cf.label}（下载中…）`
+						: this.plugin.fontLibrary.isDownloaded(cf)
+							? cf.label
+							: `${cf.label}（未下载，选择即下载）`;
 					group.appendChild(opt);
 				}
 				fontSel.appendChild(group);
@@ -2062,28 +2109,118 @@ export class EpubReaderView extends FileView {
 				fontSel.appendChild(opt);
 			}
 			fontSel.value = s.fontFamily;
+			// 桌面端自绘下拉：选项重建后同步触发器文字与高亮
+			if (useFontDD && ddTrigger) {
+				const sel = fontSel.selectedOptions[0];
+				ddTrigger.querySelector('.fleur-epub-fontdd-text')?.setText(sel?.textContent ?? '');
+			}
 		};
 		fillFontOptions();
-		// 面板打开时后台刷新已下载字体（下载/删除后列表同步），有变化则重填选项
-		const downloadedCountAtOpen = this.plugin.fontLibrary.downloaded.length;
-		void this.plugin.fontLibrary.refreshDownloaded().then((list) => {
-			if (list.length !== downloadedCountAtOpen) fillFontOptions();
-		});
-		fontSel.addEventListener('change', () => {
-			s.fontFamily = fontSel.value;
-			persist();
-		});
-		const libBtn = fontRow.createEl('button', 'fleur-epub-appear-mini');
-		libBtn.setText('字体库');
-		libBtn.setAttribute('aria-label', '在线字体库：下载开源字体');
-		libBtn.addEventListener('click', () => {
-			new FontLibraryModal(this.plugin, () => {
-				void this.plugin.fontLibrary.refreshDownloaded().then(() => {
+		// 面板打开时后台刷新已下载状态（下载/删除后标注同步），完成后重填选项刷新标注
+		void this.plugin.fontLibrary.refreshDownloaded().then(() => fillFontOptions());
+		// 字体选择统一入口（原生 change 与桌面自绘下拉共用）：
+		// 微信读书式——选中未下载字体 → 立即下载，成功自动套用，失败回退原选择
+		const applyFontValue = async (v: string) => {
+			const cf = FONT_CATALOG.find((c) => c.stack === v);
+			if (cf && !this.plugin.fontLibrary.isDownloaded(cf)) {
+				if (this.plugin.fontLibrary.downloading.has(cf.id)) return;
+				const prev = s.fontFamily;
+				fillFontOptions();
+				fontSel.value = v; // 下载期间保持选中该项（显示「下载中…」）
+				if (useFontDD && ddTrigger) {
+					const sel = fontSel.selectedOptions[0];
+					ddTrigger.querySelector('.fleur-epub-fontdd-text')?.setText(sel?.textContent ?? '');
+				}
+				const ok = await this.plugin.fontLibrary.download(cf);
+				if (ok) {
+					s.fontFamily = cf.stack;
+					persist();
 					fillFontOptions();
 					this.applyReaderStyles();
-				});
-			}).open();
+				} else {
+					s.fontFamily = prev;
+					fillFontOptions(); // 末尾按 s.fontFamily 恢复选中态
+				}
+				return;
+			}
+			s.fontFamily = v;
+			persist();
+			fillFontOptions(); // 同步触发器文字
+		};
+		fontSel.addEventListener('change', () => {
+			void applyFontValue(fontSel.value);
 		});
+		// 桌面端：构建自绘下拉触发器（替代原生 select 的弹出方向）
+		if (useFontDD) {
+			const trigger = fontRow.createDiv('fleur-epub-fontdd-trigger');
+			trigger.setAttribute('role', 'button');
+			trigger.setAttribute('aria-label', '选择字体');
+			trigger.setAttribute('aria-haspopup', 'listbox');
+			trigger.createSpan('fleur-epub-fontdd-text');
+			const caret = trigger.createSpan('fleur-epub-fontdd-caret');
+			setIcon(caret, 'chevron-down');
+			ddTrigger = trigger;
+			// 初始文字
+			const sel0 = fontSel.selectedOptions[0];
+			const ddTextSpan = trigger.querySelector('.fleur-epub-fontdd-text') as HTMLElement | null;
+			ddTextSpan?.setText(sel0?.textContent ?? '');
+			// 触发器文字可能被截断，悬停浮出全称
+			trigger.addEventListener('mouseenter', () => {
+				if (ddTextSpan) showFontTip(ddTextSpan, ddTextSpan.textContent ?? '');
+			});
+			trigger.addEventListener('mouseleave', hideFontTip);
+			fontSel.addClass('fleur-epub-fontdd-hidden');
+			trigger.addEventListener('click', (e) => {
+				e.stopPropagation();
+				if (ddPopup) {
+					closeFontDD();
+					return;
+				}
+				closeFontDD();
+				const popup = trigger.createDiv('fleur-epub-fontdd-popup');
+				popup.setAttribute('role', 'listbox');
+				const addOpt = (opt: HTMLOptionElement) => {
+					const item = popup.createDiv('fleur-epub-fontdd-item');
+					item.setText(opt.textContent ?? '');
+					// 截断时悬停浮出全称（自绘 tip，见 showFontTip）
+					item.addEventListener('mouseenter', () => showFontTip(item, opt.textContent ?? ''));
+					item.addEventListener('mouseleave', hideFontTip);
+					if (opt.value === fontSel.value) item.addClass('is-active');
+					item.addEventListener('click', (ev) => {
+						ev.stopPropagation();
+						closeFontDD();
+						void applyFontValue(opt.value);
+					});
+				};
+				for (const child of Array.from(fontSel.children)) {
+					if (child instanceof HTMLOptGroupElement) {
+						popup.createDiv('fleur-epub-fontdd-group').setText(child.label);
+						for (const opt of Array.from(child.children)) {
+							if (opt instanceof HTMLOptionElement) addOpt(opt);
+						}
+					} else if (child instanceof HTMLOptionElement) {
+						addOpt(child);
+					}
+				}
+				// 方向：默认向下（用户预期）；下方空间不足且上方更宽裕才向上翻折
+				const rect = trigger.getBoundingClientRect();
+				if (window.innerHeight - rect.bottom < 280 && rect.top > 320) popup.addClass('is-up');
+				ddPopup = popup;
+				trigger.addClass('is-open');
+				// 点击外部 / Esc 关闭（capture 捕获，避免面板内其他交互干扰）
+				const dismiss = (ev: Event) => {
+					if (ev instanceof KeyboardEvent) {
+						if (ev.key === 'Escape') closeFontDD();
+						return;
+					}
+					if (ev.target instanceof Node && trigger.contains(ev.target)) return;
+					closeFontDD();
+				};
+				ddDismiss = dismiss;
+				document.addEventListener('pointerdown', dismiss, true);
+				document.addEventListener('keydown', dismiss, true);
+			});
+		}
 		const scanBtn = fontRow.createEl('button', 'fleur-epub-appear-mini');
 		scanBtn.setText('扫描本机');
 		scanBtn.addEventListener('click', async () => {

@@ -3,6 +3,7 @@ import type FleurEpubPlugin from './main';
 import { PROMPT_PRESETS, getPromptPreset, getPresetPreview, isCustomPresetKey, ANNOTATION_DEFAULT_BASE_LIMIT, type PromptPresetKey } from './ai-prompts';
 import { applyMobileBodyClass } from './platform';
 import { collectFolderPaths } from './folders';
+import { FontLibraryModal } from './font-library';
 import { ReaderTTS } from './tts';
 import { ONLINE_TTS_PRESETS } from './tts-online';
 
@@ -229,6 +230,18 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 						this.plugin.getActiveReader()?.applyReaderStyles();
 					}),
+			);
+
+		// ── 在线字体库管理（下载入口在阅读页字体下拉，此处管理已下载字体） ──
+		new Setting(containerEl)
+			.setName('在线字体库')
+			.setDesc('管理已下载的开源字体（SIL OFL 1.1，存于 .fleur-epub-fonts/）。下载请到阅读页「Aa」面板的字体列表。')
+			.addButton((btn) =>
+				btn.setButtonText('管理').onClick(() => {
+					new FontLibraryModal(this.plugin, () => {
+						this.plugin.getActiveReader()?.applyReaderStyles();
+					}).open();
+				}),
 			);
 
 		// ── 批注（侧边栏排序等） ──

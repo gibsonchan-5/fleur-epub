@@ -2822,3 +2822,105 @@ body.fleur-epub-mobile .fleur-epub-shelf-card-pct {
 .fleur-epub-fontlib-actions button {
 	min-width: 64px;
 }
+
+/* ── 桌面端字体自绘下拉：固定向下展开（原生 select 弹出方向由系统决定，不可控） ── */
+.fleur-epub-fontdd-hidden {
+	display: none !important;
+}
+.fleur-epub-fontdd-trigger {
+	flex: 1;
+	min-width: 0;
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	height: 24px;
+	padding: 0 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	font-size: 12.5px;
+	cursor: pointer;
+	user-select: none;
+	-webkit-user-select: none;
+}
+.fleur-epub-fontdd-trigger:hover {
+	border-color: var(--background-modifier-border-hover);
+}
+.fleur-epub-fontdd-trigger.is-open {
+	border-color: var(--interactive-accent);
+}
+.fleur-epub-fontdd-text {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.fleur-epub-fontdd-caret {
+	display: flex;
+	color: var(--text-muted);
+	pointer-events: none;
+}
+.fleur-epub-fontdd-caret svg {
+	width: 12px;
+	height: 12px;
+}
+.fleur-epub-fontdd-popup {
+	position: absolute;
+	top: calc(100% + 6px);
+	left: 0;
+	right: 0;
+	max-height: 300px;
+	overflow-y: auto;
+	padding: 4px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	box-shadow: 0 8px 30px rgba(0, 0, 0, 0.16);
+	z-index: 10030;
+}
+/* 下方空间不足才向上翻折（默认向下） */
+.fleur-epub-fontdd-popup.is-up {
+	top: auto;
+	bottom: calc(100% + 6px);
+}
+.fleur-epub-fontdd-group {
+	padding: 6px 8px 2px;
+	font-size: 11px;
+	color: var(--text-muted);
+}
+.fleur-epub-fontdd-item {
+	padding: 5px 8px;
+	border-radius: 5px;
+	font-size: 12.5px;
+	color: var(--text-normal);
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.fleur-epub-fontdd-item:hover {
+	background: var(--background-modifier-hover);
+}
+.fleur-epub-fontdd-item.is-active {
+	color: var(--interactive-accent);
+	font-weight: 600;
+}
+
+/* ── 字体下拉自绘全称提示：仅当条目文字被截断时悬停浮出 ── */
+.fleur-epub-fontdd-tip {
+	position: fixed;
+	z-index: 10040;
+	max-width: 360px;
+	padding: 5px 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: 12.5px;
+	white-space: nowrap;
+	box-shadow: 0 4px 18px rgba(0, 0, 0, 0.14);
+	pointer-events: none;
+}
