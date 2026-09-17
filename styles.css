@@ -1724,11 +1724,14 @@ body.fleur-epub-immersive .status-bar,
 body.fleur-epub-immersive .view-header {
 	display: none !important;
 }
-/* 沉浸下根元素已 fixed inset-0，宿主给视图容器留的上下内边距全部归零
-   （只清上下：左右由下面的 is-mobile 全宽规则统一处理） */
+/* 沉浸下根元素已 fixed inset-0，宿主给视图容器留的内边距必须**四个方向**全部归零。
+   只清上下是不够的：fixed 定位包含块即视口，50% − 50vw 恒等于 0，下面的全宽规则
+   帮不上忙；Obsidian 给 .view-content 留的左右 padding 一旦残留，reader 就被关在
+   content box 里缩进约 12px，两侧露出 root 的 --background-primary 白底
+   （真机 iPhone 实测：两侧纯白竖条、而顶栏 absolute 相对 padding box 定位仍满宽，
+   表现为「工具栏色调超出白边」。2026-09-17 复现台场景 11 复现、本修复后归零）。 */
 body.fleur-epub-immersive .fleur-epub-root {
-	padding-top: 0 !important;
-	padding-bottom: 0 !important;
+	padding: 0 !important;
 }
 
 /* 真机移动端「两侧白边」：宿主会给视图容器留左右内边距，深色阅读主题下
@@ -2253,6 +2256,63 @@ body.fleur-epub-mobile .fleur-epub-appear--sheet {
 body.fleur-epub-mobile .fleur-epub-appear--sheet input[type='text'],
 body.fleur-epub-mobile .fleur-epub-appear--sheet input[type='number'] {
 	font-size: 16px;
+}
+
+/* ── M5 移动端外观面板：行高 / 标签 / 档位 / 滑杆触控适配（桌面端零影响） ── */
+/* 标签列加宽：容纳「自定义字体」5 字不折行（桌面 52px 够用，不动） */
+body.fleur-epub-mobile .fleur-epub-appear-row {
+	min-height: 34px;
+}
+body.fleur-epub-mobile .fleur-epub-appear-label {
+	flex-basis: 66px;
+	line-height: 1.3;
+	white-space: nowrap;
+}
+/* 触控目标：面板内小按钮统一 32px 高 */
+body.fleur-epub-mobile .fleur-epub-appear-mini {
+	min-height: 32px;
+	padding: 6px 12px;
+	font-size: 13px;
+}
+/* 档位行（字重 / 首行）：等宽分段控件，宽度一致、起点对齐 */
+body.fleur-epub-mobile .fleur-epub-appear-row.is-seg {
+	gap: 6px;
+}
+body.fleur-epub-mobile .fleur-epub-appear-row.is-seg .fleur-epub-appear-mini {
+	flex: 1 1 0;
+	max-width: 88px;
+	padding: 6px 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+/* 滑杆：自绘 4px 轨道 + 24px 拇指（真机原生滑杆精度差、拇指过小）；
+   touch-action:none 防止拖动被 sheet 的滚动劫持——这是「滑条基本无法操作」的主因。
+   桌面端保持 accent-color 原生外观，不动。 */
+body.fleur-epub-mobile .fleur-epub-appear-range {
+	-webkit-appearance: none;
+	appearance: none;
+	height: 28px;
+	margin: 0;
+	padding: 0;
+	background: transparent;
+	touch-action: none;
+}
+body.fleur-epub-mobile .fleur-epub-appear-range::-webkit-slider-runnable-track {
+	height: 4px;
+	border-radius: 2px;
+	background: var(--background-modifier-border);
+}
+body.fleur-epub-mobile .fleur-epub-appear-range::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	appearance: none;
+	width: 24px;
+	height: 24px;
+	margin-top: -10px;
+	border-radius: 50%;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
 }
 
 /* ── M4 补全：移动端批注 sheet 的「导出笔记」按钮 ──

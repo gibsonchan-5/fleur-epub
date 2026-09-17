@@ -1971,6 +1971,16 @@ export class EpubReaderView extends FileView {
 			void this.plugin.saveSettings();
 			this.applyReaderStyles();
 		};
+		// 移动端滑杆专用：拖动过程只更新数值显示，停手后才落盘 + 重排。
+		// 每个 input 事件都整书重排在真机上会卡到「基本无法拖动」（桌面保持即时预览不变）。
+		let persistTimer: number | null = null;
+		const persistSoon = () => {
+			if (persistTimer !== null) window.clearTimeout(persistTimer);
+			persistTimer = window.setTimeout(() => {
+				persistTimer = null;
+				persist();
+			}, 180);
+		};
 
 		// ── 背景主题：圆形 swatch（浅色 · 深色 · 暖黄 · 豆绿）──
 		// 移动端不再列出：底部工具栏已有独立的「背景」（调色板）入口，
@@ -2089,6 +2099,8 @@ export class EpubReaderView extends FileView {
 
 		// ── 字重：细 / 常规 / 中等 / 粗 档位 ──
 		const weightRow = mkRow('字重');
+		// is-seg：移动端把该行按钮排成等宽分段（见 styles.css 移动端段）
+		weightRow.addClass('is-seg');
 		const WEIGHTS: Array<{ v: number; label: string }> = [
 			{ v: 300, label: '细' },
 			{ v: 400, label: '常规' },
@@ -2114,6 +2126,7 @@ export class EpubReaderView extends FileView {
 
 		// ── 首行：缩进 / 顶格 ──
 		const indentRow = mkRow('首行');
+		indentRow.addClass('is-seg');
 		const indentBtns: HTMLElement[] = [];
 		const INDENT_OPTS: Array<{ v: boolean; label: string }> = [
 			{ v: true, label: '缩进' },
@@ -2156,7 +2169,8 @@ export class EpubReaderView extends FileView {
 				const v = parseFloat(slider.value);
 				set(v);
 				val.setText(fmt(v));
-				persist();
+				if (isMobileUI(this.plugin)) persistSoon();
+				else persist();
 			});
 			sliderSyncers.push(() => {
 				slider.value = String(get());
