@@ -10,6 +10,7 @@ import { HIGHLIGHT_COLORS, READER_THEMES } from './reader-view';
 import type { EpubReaderView } from './reader-view';
 import type { ReaderTheme } from './settings';
 import { buildTTSPlayer } from './tts-player';
+import { cleanAnnotationText } from './text-utils';
 
 /** 底部工具栏条目（微信读书式五键：目录 · 批注 · 进度 · 背景 · 排版） */
 const TOOLBAR_ITEMS: Array<{ id: 'toc' | 'progress' | 'anns' | 'theme' | 'type'; icon: string; label: string }> = [
@@ -308,8 +309,13 @@ export class MobileChrome {
 				dot.setCssStyles({ background: HIGHLIGHT_COLORS[ann.color] ?? HIGHLIGHT_COLORS.yellow });
 				const main = row.createDiv('fleur-epub-sheet-ann-main');
 				main.createDiv('fleur-epub-sheet-ann-label').setText(ann.chapterLabel || '批注');
-				const preview = ann.comment || ann.text || '';
-				if (preview) main.createDiv('fleur-epub-sheet-ann-text').setText(preview.slice(0, 60));
+				// 原文在上（高亮/划线/批注都显示），批注内容在下（左竖线区分，微信读书式）
+				const text = (ann.text || '').replace(/\s+/g, ' ').trim();
+				if (text) main.createDiv('fleur-epub-sheet-ann-text').setText(text.slice(0, 60));
+				if (ann.comment) {
+					const comment = cleanAnnotationText(ann.comment).replace(/\s+/g, ' ').trim();
+					if (comment) main.createDiv('fleur-epub-sheet-ann-comment').setText(comment.slice(0, 60));
+				}
 				row.addEventListener('click', () => {
 					void this.view.locateAnnotation(ann.cfi);
 					this.hide();

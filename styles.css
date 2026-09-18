@@ -2057,6 +2057,20 @@ body.fleur-epub-mobile .fleur-epub-sheet-ann-text {
 	-webkit-line-clamp: 2;
 	-webkit-box-orient: vertical;
 }
+/* 批注内容：原文下方的想法，左竖线与原文区分（对齐桌面端「原文+批注」分块结构） */
+body.fleur-epub-mobile .fleur-epub-sheet-ann-comment {
+	margin-top: 6px;
+	padding-left: 8px;
+	border-left: 2px solid var(--interactive-accent);
+	font-size: 14px;
+	line-height: 1.5;
+	color: var(--fleur-epub-text, var(--text-normal));
+	overflow: hidden;
+	text-overflow: ellipsis;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+}
 
 /* ── M3 选段批注：移动端底部工具条 ───────────────────────────────
    与桌面 selbar 共用 dot/btn/sep 内部样式，容器独立：
