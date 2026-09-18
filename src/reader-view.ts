@@ -589,13 +589,9 @@ export class EpubReaderView extends FileView {
 	}
 
 	private async loadBook(file: TFile): Promise<void> {
-		// 开书诊断链（①读取 → ②解析 → ③章节 iframe → ④可阅读）：早期用于排查
-		// 移动端「开书空白无报错」，现仅在「设置 → 高级 → 移动端调试模式」开启时输出；
-		// 普通使用时开书不再弹任何阶段提示。
-		const dbg = isMobileUI(this.plugin) && this.plugin.settings.mobileDebug;
-		const stage = (msg: string, long = false) => {
-			if (dbg) new Notice(`[FleurEPUB] ${msg}`, long ? 8000 : 2200);
-		};
+		// 开书诊断链（①读取 → ②解析 → ③章节 iframe → ④可阅读）：原为「移动端调试模式」
+		// 下的 Notice 诊断，随该开关一并移除，现仅 console.debug（审核规则允许 debug 级）。
+		const stage = (msg: string) => console.debug(`[FleurEPUB] ${msg}`);
 		try {
 			const bytes = await this.app.vault.readBinary(file);
 			// foliate-js makeBook 直接接受 File 对象（内部走 vendor/zip.js 解压）
@@ -706,10 +702,8 @@ export class EpubReaderView extends FileView {
 			await view.open(fileObj);
 			stage('② EPUB 格式解析完成');
 
-			// 渲染看门狗：首个章节 load 事件 15s 内未到 → 大概率 iframe（blob:）被移动端拦
-			let firstLoad = false;
+			// 首个章节 load 事件（诊断链 ③）；渲染看门狗已随调试模式移除
 			view.addEventListener('load', () => {
-				firstLoad = true;
 				stage('③ 章节 iframe 已加载');
 			}, { once: true });
 
@@ -746,15 +740,6 @@ export class EpubReaderView extends FileView {
 			this.setProgress(this.bookData.progress?.percent ?? 0);
 
 			const cfi = this.bookData.progress?.cfi;
-			// 看门狗只在调试模式下挂（避免普通使用白留一个空转计时器）
-			const watchdog = dbg ? window.setTimeout(() => {
-				if (!firstLoad) {
-					// 诊断链：vendor load() 埋点（blob/srcdoc 路径选择、fetch、srcdoc 设置）
-					const chain = (window as any).__fleur_epub_diag as string[] | undefined;
-					const tail = chain?.length ? `\n${chain.slice(-6).join('\n')}` : '\n[诊断链为空：srcdoc 分支未执行]';
-					stage(`③ 渲染超时：章节 iframe 15s 未加载${tail}`, true);
-				}
-			}, 15000) : 0;
 			if (cfi) {
 				try {
 					await view.goTo(cfi);
@@ -765,7 +750,6 @@ export class EpubReaderView extends FileView {
 			} else {
 				await view.init({ lastLocation: undefined });
 			}
-			window.clearTimeout(watchdog);
 			stage('④ 渲染完成，可以阅读');
 
 			this.loadedPath = file.path;
@@ -2792,9 +2776,7 @@ export class EpubReaderView extends FileView {
 	 */
 	private async handleBookLink(a: HTMLElement | null | undefined, href: string | undefined): Promise<void> {
 		if (!href) return;
-		const trace = (msg: string) => {
-			if (this.plugin.settings.mobileDebug) new Notice(`fleur-epub link: ${msg}`, 4000);
-		};
+		const trace = (msg: string) => console.debug(`[FleurEPUB link] ${msg}`);
 		try {
 			const view = this.foliateView;
 			const book = view?.book;

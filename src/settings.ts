@@ -1,7 +1,6 @@
 import { App, PluginSettingTab, Setting, DropdownComponent, Notice, requestUrl } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { PROMPT_PRESETS, getPromptPreset, getPresetPreview, isCustomPresetKey, ANNOTATION_DEFAULT_BASE_LIMIT, type PromptPresetKey } from './ai-prompts';
-import { applyMobileBodyClass } from './platform';
 import { collectFolderPaths } from './folders';
 import { FontLibraryModal } from './font-library';
 import { ReaderTTS } from './tts';
@@ -93,8 +92,6 @@ export interface FleurEpubSettings {
 	annPopSize?: { w: number; h: number };
 	/** 批注笔记导出文件夹（vault 内相对路径；'' = 根目录，默认 FleurEpub） */
 	noteFolder: string;
-	/** 移动端调试：桌面端强制启用移动端布局（预览/开发用途，默认关） */
-	mobileDebug: boolean;
 	/** 听书声源：系统 TTS voiceURI（'' = 跟随章节语言自动选系统默认） */
 	ttsVoiceURI: string;
 	/**
@@ -147,7 +144,6 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	annotationLimit: 250,
 	annotationSort: 'time',
 	noteFolder: 'FleurEpub',
-	mobileDebug: false,
 	ttsVoiceURI: '',
 	ttsRate: 1,
 	ttsEngine: 'system',
@@ -168,6 +164,10 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 
 	display(): void {
 		const { containerEl } = this;
+		// display() 会整份重建容器；部分设置项 onChange 里会触发重渲染（如切换朗读引擎），
+		// 不记位置的话页面会跳回顶部。这里先找到实际滚动的祖先容器，重建后恢复。
+		const scroller = this.findScrollParent(containerEl);
+		const savedTop = scroller?.scrollTop ?? 0;
 		containerEl.empty();
 
 		new Setting(containerEl)
@@ -743,19 +743,30 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 			});
 		});
 
-		// ── 高级（移动端调试等开发向开关） ──
-		new Setting(containerEl).setName('高级').setHeading();
+		// ── 高级（开发向开关）── 已随「移动端调试模式」移除，暂无剩余条目
 
-		new Setting(containerEl)
-			.setName('移动端调试模式')
-			.setDesc('在桌面端强制启用移动端布局（顶栏紧凑化、底部安全区等），用于预览与开发。开启后还会输出开书阶段诊断与链接识别等排查提示。关闭后桌面端完全恢复原状，不影响任何桌面功能。')
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.mobileDebug).onChange(async (v) => {
-					this.plugin.settings.mobileDebug = v;
-					await this.plugin.saveSettings();
-					applyMobileBodyClass(this.plugin);
-				}),
-			);
+		if (scroller) {
+			scroller.scrollTop = savedTop;
+			// 重建后浏览器可能还有一帧异步布局，下一帧再兜底一次
+			requestAnimationFrame(() => {
+				scroller.scrollTop = savedTop;
+			});
+		}
+	}
+
+	/**
+	 * 向上找第一个可滚动祖先。注意必须从 el 自身开始找：Obsidian 的设置页
+	 * 滚动容器就是 containerEl 本身（框架给它挂了 .vertical-tab-content 类，
+	 * overflow-y: auto），从 parentElement 找起会漏掉它，导致恢复失效。
+	 */
+	private findScrollParent(el: HTMLElement): HTMLElement | null {
+		let p: HTMLElement | null = el;
+		while (p) {
+			const oy = getComputedStyle(p).overflowY;
+			if (oy === 'auto' || oy === 'scroll') return p;
+			p = p.parentElement;
+		}
+		return null;
 	}
 
 	/**

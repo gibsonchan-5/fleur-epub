@@ -9,15 +9,14 @@ import type FleurEpubPlugin from './main';
 export const MOBILE_BODY_CLASS = 'fleur-epub-mobile';
 
 /**
- * 是否启用移动端 UI：
- * - 真机移动端（Platform.isMobile）
- * - 桌面端开启「移动端调试」开关（settings.mobileDebug，仅预览用途）
+ * 是否启用移动端 UI：仅真机移动端（Platform.isMobile）。
+ * 原「桌面端移动端调试」开关已移除（移动端适配已成熟，不再需要桌面预览入口）。
  */
-export function isMobileUI(plugin: FleurEpubPlugin): boolean {
-	return Platform.isMobile || plugin.settings.mobileDebug === true;
+export function isMobileUI(_plugin: FleurEpubPlugin): boolean {
+	return Platform.isMobile;
 }
 
-/** 把移动端标记类同步到 body（onload 与调试开关切换时调用） */
-export function applyMobileBodyClass(plugin: FleurEpubPlugin): void {
-	document.body.classList.toggle(MOBILE_BODY_CLASS, isMobileUI(plugin));
+/** 把移动端标记类同步到 body（onload 时调用） */
+export function applyMobileBodyClass(_plugin: FleurEpubPlugin): void {
+	document.body.classList.toggle(MOBILE_BODY_CLASS, isMobileUI(_plugin));
 }

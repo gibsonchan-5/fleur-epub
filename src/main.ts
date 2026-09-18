@@ -59,18 +59,12 @@ export default class FleurEpubPlugin extends Plugin {
 		this.coverCache = new CoverCache(this.app, this);
 		this.fontLibrary = new FontLibrary(this);
 
-		// 移动端标记类：真机移动端 / 桌面调试开关时挂到 body，移动端样式全部限定在该作用域下
+		// 移动端标记类：真机移动端挂到 body，移动端样式全部限定在该作用域下（桌面端永不挂载）
 		applyMobileBodyClass(this);
 
-		// ── 移动端诊断（0.2.2 排查用，现仅在「设置 → 高级 → 移动端调试模式」开启时输出）──
+		// ── 移动端错误浮出（同一错误只提示一次，避免刷屏）──
 		// 背景：真机开书空白且无任何报错，移动端又看不到控制台，需把错误浮到 Notice。
-		// 普通使用不再弹启动探针；真实错误仍会浮出（同一错误只提示一次，避免刷屏）。
-		if (Platform.isMobile && this.settings.mobileDebug) {
-			// 平台名取自 Platform API —— 审核规则禁止用 navigator 探测运行环境。
-			// 这条只是「移动端调试模式」下的诊断提示，不参与任何功能判断。
-			const env = Platform.isIosApp ? 'iOS' : Platform.isAndroidApp ? 'Android' : 'Mobile';
-			new Notice(`[FleurEPUB ${this.manifest.version}] ${env}`, 5000);
-		}
+		// 普通使用不弹启动探针（已随「移动端调试模式」移除）；真实错误仍会浮出。
 		if (Platform.isMobile) {
 			const reported = new Set<string>();
 			const report = (label: string, e: unknown) => {
