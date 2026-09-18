@@ -92,6 +92,18 @@ export interface FleurEpubSettings {
 	annPopSize?: { w: number; h: number };
 	/** 批注笔记导出文件夹（vault 内相对路径；'' = 根目录，默认 FleurEpub） */
 	noteFolder: string;
+	/**
+	 * 批注/进度数据目录（vault 内相对路径，默认 FleurEpub/data）。
+	 * 仅当 syncDataToVault 开启时使用；默认值两端一致很关键——data.json 不同步，
+	 * 若跟随 noteFolder 等自定义值固化，另一端会算出不同目录导致同步失效。
+	 */
+	dataDir: string;
+	/**
+	 * 跨设备同步批注数据（默认关）。开启后数据写入 Vault 内 dataDir（随同步插件
+	 * 跨设备），并自动把配置目录里的旧数据迁移过去；关闭则维持旧行为（存配置目录）。
+	 * 每台设备需分别开启。
+	 */
+	syncDataToVault: boolean;
 	/** 听书声源：系统 TTS voiceURI（'' = 跟随章节语言自动选系统默认） */
 	ttsVoiceURI: string;
 	/**
@@ -144,6 +156,8 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	annotationLimit: 250,
 	annotationSort: 'time',
 	noteFolder: 'FleurEpub',
+	dataDir: 'FleurEpub/data',
+	syncDataToVault: false,
 	ttsVoiceURI: '',
 	ttsRate: 1,
 	ttsEngine: 'system',
@@ -293,6 +307,23 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				});
 			});
+
+		new Setting(containerEl)
+			.setName('跨设备同步批注数据')
+			.setDesc(
+				'开启后，批注、高亮与阅读进度改存到 Vault 内 FleurEpub/data 目录，可被 Remotely Save 等同步插件同步到其他设备（旧数据自动迁过去，原位置保留作备份）。' +
+					'需在每台设备上分别开启；关闭则数据存回配置目录，Vault 内已同步的副本保留不动。',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.syncDataToVault ?? false).onChange(async (v) => {
+					this.plugin.settings.syncDataToVault = v;
+					if (v) {
+						// 先迁移再持久化：确保首次开启时 Vault 目录里就是完整数据
+						await this.plugin.migrateDataDirIntoVault();
+					}
+					await this.plugin.saveSettings();
+				}),
+			);
 
 		// ── 对照翻译（引擎选择；微软机翻免密钥，AI 走下方 AI 配置） ──
 		new Setting(containerEl).setName('对照翻译').setHeading();

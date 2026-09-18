@@ -364,20 +364,29 @@ export class BookStore {
 
 	constructor(private app: App, private plugin: Plugin) {}
 
-	private dir(): string {
+	/**
+	 * 数据目录：默认仍在配置目录（原行为，零影响）；仅当用户在设置里开启
+	 * 「跨设备同步批注数据」后才写入 Vault 内普通目录（可被同步插件跨设备同步）。
+	 * public：main.ts 的迁移逻辑要读它。
+	 */
+	dataDir(): string {
+		const s = this.plugin as { settings?: { syncDataToVault?: boolean; dataDir?: string } };
+		if (s.settings?.syncDataToVault && s.settings.dataDir?.trim()) {
+			return s.settings.dataDir;
+		}
 		return `${this.app.vault.configDir}/plugins/fleur-epub/data`;
 	}
 
 	private mainPath(fingerprint: string): string {
-		return `${this.dir()}/${fingerprint}.json`;
+		return `${this.dataDir()}/${fingerprint}.json`;
 	}
 
 	private progressPath(fingerprint: string): string {
-		return `${this.dir()}/${fingerprint}.progress.json`;
+		return `${this.dataDir()}/${fingerprint}.progress.json`;
 	}
 
 	private transPath(fingerprint: string): string {
-		return `${this.dir()}/${fingerprint}.trans.json`;
+		return `${this.dataDir()}/${fingerprint}.trans.json`;
 	}
 
 	/** 读原文。区分「不存在」（常态，不留痕）与「真出错」（要留痕）——合并写与 load
@@ -586,7 +595,7 @@ export class BookStore {
 		if (this.parseOrNull(raw)) return { kind: 'content', raw };
 		if (this.corruptSeen.get(path) === raw) return { kind: 'none' };
 
-		const backup = `${this.dir()}/${fingerprint}.corrupt-${Date.now()}.json`;
+		const backup = `${this.dataDir()}/${fingerprint}.corrupt-${Date.now()}.json`;
 		try {
 			await this.ensureDir();
 			await this.app.vault.adapter.write(backup, raw);
@@ -630,7 +639,7 @@ export class BookStore {
 		if (!this.dirReady) {
 			const adapter = this.app.vault.adapter;
 			this.dirReady = (async () => {
-				if (!(await adapter.exists(this.dir()))) await adapter.mkdir(this.dir());
+				if (!(await adapter.exists(this.dataDir()))) await adapter.mkdir(this.dataDir());
 			})().catch((e) => {
 				// 不缓存失败：否则一次 mkdir 抖动会让整个会话都写不进去
 				this.dirReady = null;

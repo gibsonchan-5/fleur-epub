@@ -81,6 +81,7 @@ export default class FleurEpubPlugin extends Plugin {
 		}
 
 		// 指纹迁移：旧版 identifier 撞号（z-lib 通用 UUID）修复后，按新算法重命名历史数据文件
+		// （数据目录跟随「跨设备同步批注数据」开关：开启后在 Vault 内，关闭时在配置目录）
 		await this.migrateBookFingerprints();
 
 		this.registerView(VIEW_TYPE_EPUB, (leaf: WorkspaceLeaf) =>
@@ -135,6 +136,59 @@ export default class FleurEpubPlugin extends Plugin {
 	}
 
 	/**
+	 * 数据目录迁移（一次性、幂等）：把 .obsidian/plugins/fleur-epub/data 下的书数据
+	 * 复制到 Vault 内普通目录（settings.dataDir，默认 FleurEpub/data）。
+	 * 由设置页「跨设备同步批注数据」开关触发（用户自主选择），启动时不自动跑。
+	 *
+	 * 规则刻意保守，多端场景安全：
+	 * - 旧目录不存在 / 为空 → 无事可做（全新用户、已迁移后清空过）；
+	 * - 新目录已有 .json（另一端同步来的）→ **跳过**，绝不覆盖；
+	 * - 其余 → 逐个复制（同名不覆盖）；**旧目录保留不删**——它同时是关闭开关后的回退位置。
+	 */
+	async migrateDataDirIntoVault(): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const oldDir = `${this.app.vault.configDir}/plugins/fleur-epub/data`;
+		const newDir = this.bookStore.dataDir();
+		if (oldDir === newDir) return; // dataDir 为空回落旧位置时，无迁移可言
+		try {
+			if (!(await adapter.exists(oldDir))) return;
+			const oldFiles = (await adapter.list(oldDir)).files.filter((p) => p.endsWith('.json'));
+			if (!oldFiles.length) return;
+			let newFiles: string[] = [];
+			try {
+				newFiles = (await adapter.list(newDir)).files;
+			} catch {
+				// 新目录还不存在 → 视为空
+			}
+			if (newFiles.some((p) => p.endsWith('.json'))) return; // 同步来的数据优先
+			await this.ensureVaultDir(newDir);
+			let copied = 0;
+			for (const src of oldFiles) {
+				const name = src.split('/').pop() ?? src;
+				const dst = `${newDir}/${name}`;
+				if (await adapter.exists(dst)) continue;
+				await adapter.write(dst, await adapter.read(src));
+				copied++;
+			}
+			console.debug('[FleurEPUB] 数据目录迁移完成', oldDir, '→', newDir, `共 ${copied} 个文件`);
+		} catch (e) {
+			// 迁移失败绝不阻塞启动：数据仍在旧目录，下次启动重试
+			console.warn('[FleurEPUB] 数据目录迁移失败（数据仍在原位置，将在下次启动重试）', e);
+		}
+	}
+
+	/** 逐级创建 Vault 内目录（adapter.mkdir 不保证递归创建） */
+	private async ensureVaultDir(path: string): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const parts = path.split('/').filter(Boolean);
+		let cur = '';
+		for (const p of parts) {
+			cur = cur ? `${cur}/${p}` : p;
+			if (!(await adapter.exists(cur))) await adapter.mkdir(cur);
+		}
+	}
+
+	/**
 	 * 指纹迁移：v0.1.12 修复 identifier 撞号（不同书籍共用同一 UUID → 批注/进度跨书互串），
 	 * 数据文件名由旧指纹改为新指纹。按文件内记录的 book 元信息重算新指纹：
 	 * - 新旧一致 → 跳过（已迁移 / 无 identifier 书籍本就走 fallback，算法不变）
@@ -142,7 +196,7 @@ export default class FleurEpubPlugin extends Plugin {
 	 */
 	private async migrateBookFingerprints(): Promise<void> {
 		const adapter = this.app.vault.adapter;
-		const dir = `${this.app.vault.configDir}/plugins/fleur-epub/data`;
+		const dir = this.bookStore.dataDir();
 		if (!(await adapter.exists(dir))) return;
 		const list = await adapter.list(dir);
 		for (const path of list.files) {
