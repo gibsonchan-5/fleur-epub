@@ -86,6 +86,12 @@ export interface FleurEpubSettings {
 	annotationLimit: number;
 	/** 侧边栏批注组内排序：document = 行文顺序 / time = 批注时间（默认） */
 	annotationSort: AnnotationSortKind;
+	/** 高亮（批注）默认颜色：hex 值（设置页调色盘）；旧版短暂存过颜色键，读取时兼容解析 */
+	highlightColor: string;
+	/** 划线（直线）默认颜色：hex 值（设置页调色盘）；旧版短暂存过颜色键，读取时兼容解析 */
+	underlineColor: string;
+	/** 划线（波浪线）默认颜色：hex 值（设置页调色盘）；旧版短暂存过颜色键，读取时兼容解析 */
+	wavyColor: string;
 	/** AI 浮窗位置记忆 */
 	aiPanelPos?: { left: number; top: number };
 	/** 批注编辑弹窗宽度记忆（h 已废弃：高度改为随内容自适应，按钮行永远可见） */
@@ -155,6 +161,9 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	customPrompts: ['', '', ''],
 	annotationLimit: 250,
 	annotationSort: 'time',
+	highlightColor: '#dd6a58',
+	underlineColor: '#c0492f',
+	wavyColor: '#ab8de8',
 	noteFolder: 'FleurEpub',
 	dataDir: 'FleurEpub/data',
 	syncDataToVault: false,
@@ -260,6 +269,44 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 
 		// ── 批注（侧边栏排序等） ──
 		new Setting(containerEl).setName('批注').setHeading();
+
+		// 旧版（同版本早期构建）下拉存储的颜色键 → hex，仅供回显迁移；新版本一律存 hex
+		const LEGACY_COLOR_HEX: Record<string, string> = {
+			yellow: '#f2c14e', green: '#7bc47f', blue: '#64a6e8', pink: '#ef8a8a',
+			purple: '#ab8de8', red: '#dd6a58', orangered: '#c0492f',
+		};
+		const toHex = (v: string | undefined): string =>
+			(v && (LEGACY_COLOR_HEX[v] ?? (/^#[0-9a-fA-F]{3,8}$/.test(v) ? v : undefined))) ?? '';
+
+		new Setting(containerEl)
+			.setName('高亮默认颜色')
+			.setDesc('「批注」与高亮色点创建的高亮标注使用的默认颜色')
+			.addColorPicker((cp) =>
+				cp.setValue(toHex(this.plugin.settings.highlightColor) || '#dd6a58').onChange(async (v) => {
+					this.plugin.settings.highlightColor = v;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('直线默认颜色')
+			.setDesc('选区工具条「U」创建的直线标注使用的颜色')
+			.addColorPicker((cp) =>
+				cp.setValue(toHex(this.plugin.settings.underlineColor) || '#c0492f').onChange(async (v) => {
+					this.plugin.settings.underlineColor = v;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('波浪线默认颜色')
+			.setDesc('选区工具条「~」创建的波浪线标注使用的颜色')
+			.addColorPicker((cp) =>
+				cp.setValue(toHex(this.plugin.settings.wavyColor) || '#ab8de8').onChange(async (v) => {
+					this.plugin.settings.wavyColor = v;
+					await this.plugin.saveSettings();
+				}),
+			);
 
 		new Setting(containerEl)
 			.setName('侧边栏批注排序')

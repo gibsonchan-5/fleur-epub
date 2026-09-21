@@ -71,6 +71,8 @@ export const HIGHLIGHT_COLORS: Record<string, string> = {
 	purple: '#ab8de8',
 	/** 移动端三色里的「红」（朱红，与暖黄/豆绿同饱和度区间，压在纸面上不刺眼） */
 	red: '#dd6a58',
+	/** 直线默认色：橙红（较深），划在纸面上醒目但不刺眼（设置页「直线默认颜色」可改） */
+	orangered: '#c0492f',
 };
 
 /** 桌面端选区工具条：原五色（黄 · 绿 · 蓝 · 粉 · 紫），鼠标点选精度高，色多无妨 */
@@ -78,6 +80,19 @@ export const HIGHLIGHT_COLOR_KEYS = ['yellow', 'green', 'blue', 'pink', 'purple'
 
 /** 移动端选区工具条：黄 · 红 · 绿 三色（触屏上色块越多越难选准，对齐微信读书的做法） */
 export const MOBILE_HIGHLIGHT_COLOR_KEYS = ['yellow', 'red', 'green'] as const;
+
+/**
+ * 标注颜色解析：颜色键（旧数据 / 工具条色点）与 hex 值（设置页调色盘存的都是 hex）统一转成可用色值。
+ * 未知值回落黄色（与历史行为一致）。
+ */
+export function resolveAnnotationColor(color: string | undefined): string {
+	if (color) {
+		const keyed = HIGHLIGHT_COLORS[color];
+		if (keyed) return keyed;
+		if (/^#[0-9a-fA-F]{3,8}$/.test(color)) return color;
+	}
+	return HIGHLIGHT_COLORS.yellow;
+}
 
 /** 阅读主题色板：章节文档（setStyles 注入）与宿主侧（CSS 变量）共用同一套值 */
 export const READER_THEMES: Record<ReaderTheme, {
@@ -639,7 +654,7 @@ export class EpubReaderView extends FileView {
 			view.addEventListener('draw-annotation', (e: CustomEvent) => {
 				const { draw, annotation } = e.detail ?? {};
 				const a = annotation as EpubAnnotation & { value: string };
-				const color = HIGHLIGHT_COLORS[a?.color ?? 'yellow'] ?? HIGHLIGHT_COLORS.yellow;
+				const color = resolveAnnotationColor(a?.color);
 				if (a?.kind === 'underline') draw(Overlayer.underline, { color, width: 2 });
 				else if (a?.kind === 'wavy') draw(Overlayer.squiggly, { color, width: 1.4 });
 				else draw(Overlayer.highlight, { color });
@@ -1812,10 +1827,10 @@ export class EpubReaderView extends FileView {
 			});
 			return b;
 		};
-		mkBtn('U', '划线（直线）', () => void this.createAnnotation('underline', 'blue'));
-		mkBtn('~', '划线（波浪线）', () => void this.createAnnotation('wavy', 'purple'));
+		mkBtn('U', '划线（直线）', () => void this.createAnnotation('underline', this.plugin.settings.underlineColor || 'orangered'));
+		mkBtn('~', '划线（波浪线）', () => void this.createAnnotation('wavy', this.plugin.settings.wavyColor || 'purple'));
 		mkBtn('✎', '批注', () => {
-			void this.createAnnotation('highlight', 'yellow').then((ann) => {
+			void this.createAnnotation('highlight', this.plugin.settings.highlightColor || 'yellow').then((ann) => {
 				if (ann) this.showAnnotationEditor(ann, host.x, host.y);
 			});
 		});
@@ -2646,7 +2661,7 @@ export class EpubReaderView extends FileView {
 			const quote = body.createDiv('fleur-epub-annpop-quote');
 			quote
 				.createDiv('fleur-epub-annpop-quote-bar')
-				.setCssProps({ '--fleur-hl-color': HIGHLIGHT_COLORS[ann.color] ?? '#f2c14e' });
+				.setCssProps({ '--fleur-hl-color': resolveAnnotationColor(ann.color) });
 			quote.createDiv('fleur-epub-annpop-quote-text').setText(ann.text);
 		}
 		body.createDiv('fleur-epub-annpop-label').setText('注释');

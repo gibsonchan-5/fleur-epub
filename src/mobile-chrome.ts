@@ -5,8 +5,8 @@
 
 import { Notice, setIcon } from 'obsidian';
 // 与 reader-view 存在类型层面的相互引用（此处仅类型 + 延迟使用的常量），
-// ESM live binding 下运行时安全：HIGHLIGHT_COLORS / READER_THEMES 只在事件回调中读取。
-import { HIGHLIGHT_COLORS, READER_THEMES } from './reader-view';
+// ESM live binding 下运行时安全：resolveAnnotationColor / READER_THEMES 只在事件回调中读取。
+import { resolveAnnotationColor, READER_THEMES } from './reader-view';
 import type { EpubReaderView } from './reader-view';
 import type { ReaderTheme } from './settings';
 import { buildTTSPlayer } from './tts-player';
@@ -306,7 +306,7 @@ export class MobileChrome {
 			for (const ann of anns) {
 				const row = body.createDiv('fleur-epub-sheet-ann');
 				const dot = row.createSpan('fleur-epub-sheet-ann-dot');
-				dot.setCssStyles({ background: HIGHLIGHT_COLORS[ann.color] ?? HIGHLIGHT_COLORS.yellow });
+				dot.setCssStyles({ background: resolveAnnotationColor(ann.color) });
 				const main = row.createDiv('fleur-epub-sheet-ann-main');
 				main.createDiv('fleur-epub-sheet-ann-label').setText(ann.chapterLabel || '批注');
 				// 原文在上（高亮/划线/批注都显示），批注内容在下（左竖线区分，微信读书式）

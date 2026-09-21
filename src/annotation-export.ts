@@ -5,7 +5,7 @@
 import { Notice } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import type { EpubReaderView } from './reader-view';
-import { HIGHLIGHT_COLORS } from './reader-view';
+import { resolveAnnotationColor } from './reader-view';
 import { cleanAnnotationText } from './text-utils';
 
 /** 按背景亮度选可读前景色（导出 Markdown 高亮底色用） */
@@ -61,7 +61,7 @@ export async function exportAnnotationsToNote(plugin: FleurEpubPlugin, reader: E
 			md += `## ${chapter}\n\n`;
 			for (const ann of items) {
 				const t = normalizeWhitespace(ann.text);
-				const color = HIGHLIGHT_COLORS[ann.color] ?? HIGHLIGHT_COLORS.yellow;
+				const color = resolveAnnotationColor(ann.color);
 				if (ann.kind === 'highlight') {
 					const fg = pickReadableFg(color);
 					md += `<span style="background-color:${color};color:${fg};padding:0 2px;border-radius:2px">${t}</span>\n\n`;

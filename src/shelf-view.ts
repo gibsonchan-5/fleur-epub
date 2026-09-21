@@ -5,7 +5,7 @@
 
 import { ItemView, WorkspaceLeaf, Notice, TFile, debounce } from 'obsidian';
 import type FleurEpubPlugin from './main';
-import { HIGHLIGHT_COLORS } from './reader-view';
+import { resolveAnnotationColor } from './reader-view';
 import { compare as CFIcompare } from '../vendor/foliate-js/epubcfi.js';
 import { AIService } from './ai-service';
 import { resolveSystemPrompt } from './ai-prompts';
@@ -528,7 +528,7 @@ export class ShelfView extends ItemView {
 
 		// 顶部色条
 		const bar = card.createDiv('fleur-epub-card-bar');
-		bar.setCssProps({ '--fleur-bar-color': HIGHLIGHT_COLORS[ann.color] ?? HIGHLIGHT_COLORS.yellow });
+		bar.setCssProps({ '--fleur-bar-color': resolveAnnotationColor(ann.color) });
 
 		const main = card.createDiv('fleur-epub-card-main');
 
