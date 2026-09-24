@@ -5,12 +5,26 @@ import { collectFolderPaths } from './folders';
 import { FontLibraryModal } from './font-library';
 import { ReaderTTS } from './tts';
 import { ONLINE_TTS_PRESETS } from './tts-online';
+import { getFleurDictBridge } from './dict-bridge';
+import { WordbookManagerModal } from './wordbook-manager-modal';
 
 /** 阅读背景主题：浅色 / 深色 / 暖黄 / 豆绿（微信读书式四色） */
 export type ReaderTheme = 'light' | 'dark' | 'sepia' | 'green';
 
 /** 对照翻译引擎：AI（大模型，支持文言→白话）/ 微软机翻（免密钥、快、零 token） */
 export type TranslationEngineKind = 'ai' | 'microsoft';
+
+/** 独立生词本词条（dictSyncWordbook = false 时写入 settings.wordbook） */
+export interface WordbookItem {
+	word: string;
+	/** 查询得到的释义（可能为空：查询失败/离线时也允许落词） */
+	meaning: string;
+	phonetic: string;
+	/** 查词时的原文上下文（选段） */
+	context?: string;
+	/** 落词时间（ISO） */
+	addedAt: string;
+}
 
 /** 侧边栏批注排序：document = 行文顺序（按 CFI 在正文中的位置）/ time = 批注创建时间 */
 export type AnnotationSortKind = 'document' | 'time';
@@ -128,6 +142,17 @@ export interface FleurEpubSettings {
 	ttsOnlineModel: string;
 	/** 在线语音音色 id */
 	ttsOnlineVoice: string;
+	// ── 词典查词（桥接 FleurDict，需 FleurDict ≥ 1.5.12；未安装时相关按钮不渲染） ──
+	/** 查词来源（fleur-epub 内查词固定用此选项，不读取 FleurDict 的设置） */
+	dictSource: 'youdao' | 'free-dict';
+	/** 内置查词弹窗位置/尺寸记忆（对齐 FleurDict：拖拽/缩放后持久化，下次打开恢复） */
+	dictPopupRect?: { left: number; top: number; width: number; height: number };
+	/** 生词本同步：true = 写入 FleurDict 词库（联动闪卡/词高亮/欧路同步）；false = 存 fleur-epub 独立生词本（wordbook） */
+	dictSyncWordbook: boolean;
+	/** 独立生词本（仅 dictSyncWordbook = false 时写入；存 data.json，跨设备随配置目录） */
+	wordbook: WordbookItem[];
+	/** WordWise 生词注释：开启后在正文生词上方绘制简要注释（词库 = FleurDict + 独立生词本合并） */
+	wordwiseEnabled: boolean;
 	/** 听书语速（播放器可调，持久化） */
 	ttsRate: number;
 }
@@ -154,6 +179,10 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	aiProvider: 'deepseek',
 	apiKey: '',
 	secretStorageMode: 'system',
+	dictSource: 'youdao',
+	dictSyncWordbook: true,
+	wordbook: [],
+	wordwiseEnabled: false,
 	baseUrl: 'https://api.deepseek.com/v1',
 	model: 'deepseek-chat',
 	temperature: 0.7,
@@ -373,6 +402,63 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 			);
 
 		// ── 对照翻译（引擎选择；微软机翻免密钥，AI 走下方 AI 配置） ──
+		// ── 词典查词（桥接 FleurDict） ──
+		new Setting(containerEl).setName('词典查词（FleurDict）').setHeading();
+
+		const dictAvailable = getFleurDictBridge(this.plugin.app) != null;
+		const dictHint = containerEl.createEl('p', {
+			text: dictAvailable
+				? '已检测到 FleurDict：阅读页选中单词 / 短语可查词（含 AI 详解、加入生词本），选中句子可 AI 翻译。'
+				: '未检测到 FleurDict（或版本低于 1.5.12）：安装并启用后，阅读页会自动出现查词入口；未安装不影响其他功能。',
+			cls: 'setting-item-description',
+		});
+
+		new Setting(containerEl)
+			.setName('查词来源')
+			.setDesc('选中单词 / 短语查词时使用的词典（只影响 fleur-epub 内的查词）')
+			.addDropdown((drop) =>
+				drop
+					.addOption('youdao', '有道词典（英汉释义）')
+					.addOption('free-dict', 'Free Dictionary（英文释义）')
+					.setValue(this.plugin.settings.dictSource)
+					.onChange(async (v) => {
+						this.plugin.settings.dictSource = v === 'free-dict' ? 'free-dict' : 'youdao';
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('生词本与 FleurDict 同步')
+			.setDesc('开启 = 加入生词本时写入 FleurDict 词库（闪卡复习、生词高亮、欧路同步全链路生效）；关闭 = 存入 fleur-epub 独立生词本，与 FleurDict 互不影响')
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.dictSyncWordbook).onChange(async (v) => {
+					this.plugin.settings.dictSyncWordbook = v;
+					await this.plugin.saveSettings();
+					this.display();
+				}),
+			);
+
+		// 独立生词本条目始终显示：同步关闭时是主词库；同步开启时也可能有历史遗留
+		// 词条（开同步前落的词「保留不动」，仍需管理入口），为空且同步开则只提示。
+		{
+			const count = this.plugin.settings.wordbook.length;
+			const desc = this.plugin.settings.dictSyncWordbook
+				? count > 0
+					? `另有 ${count} 条历史词条存于本插件（开启同步前落的词，保留不动；新查的词已写入 FleurDict）`
+					: '为空（开启同步中：新查的词将写入 FleurDict 词库）'
+				: `当前 ${count} 词（存于本插件 data.json；勾选上方同步后新查的词将写入 FleurDict，已有词条保留不动）`;
+			const entry = new Setting(containerEl).setName('独立生词本').setDesc(desc);
+			// 同步开 + 独立词库为空 → 无可管理内容，不给按钮
+			if (count > 0) {
+				entry.addButton((b) =>
+					b.setButtonText('管理').onClick(() => {
+						new WordbookManagerModal(this.plugin).open();
+					}),
+				);
+			}
+		}
+
+		// ── 对照翻译 ──
 		new Setting(containerEl).setName('对照翻译').setHeading();
 
 		new Setting(containerEl)

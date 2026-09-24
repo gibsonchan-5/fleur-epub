@@ -399,6 +399,10 @@ class View {
         // fleur-epub patch: 关书后无文档可设置
         if (!doc || !doc.body) return
         for (const el of doc.body.querySelectorAll('img, svg, video')) {
+            // fleur-epub patch: WordWise 注释 overlay 是全文档尺寸的 svg，
+            // 被这里 !important 的 max-width:100% 钳制会整体等比缩小（flow 切换后注释变小），
+            // 必须跳过
+            if (el.classList?.contains('fleur-epub-wordwise')) continue
             // preserve max size if they are already set
             const { maxHeight, maxWidth } = doc.defaultView.getComputedStyle(el)
             setStylesImportant(el, {

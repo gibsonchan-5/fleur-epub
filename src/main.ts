@@ -5,6 +5,7 @@ import { Events, Notice, Platform, Plugin, TFile, WorkspaceLeaf } from 'obsidian
 import { BookStore, computeFingerprint, isMainDataFileName, type BookData } from './store';
 import { CoverCache } from './cover-cache';
 import { DEFAULT_SETTINGS, FleurEpubSettingTab, type FleurEpubSettings } from './settings';
+import { getFleurDictBridge, queryMeaning, type FleurDictBridge } from './dict-bridge';
 import { EpubReaderView, VIEW_TYPE_EPUB } from './reader-view';
 import { ShelfView, VIEW_TYPE_SHELF } from './shelf-view';
 import { FontLibrary } from './font-library';
@@ -49,6 +50,63 @@ export default class FleurEpubPlugin extends Plugin {
 			if (view?.isBookLoaded()) return view;
 		}
 		return null;
+	}
+
+	// ── 独立生词本（dictSyncWordbook = false 时使用；存 settings.wordbook → data.json） ──
+
+	/**
+	 * 加入独立生词本：去重（同词忽略）、填充释义（复用 FleurDict 词典引擎，可失败）、
+	 * 落盘并 Notice。不触碰 FleurDict 的词库数据。
+	 */
+	async addLocalWordbookEntry(word: string, context: string | undefined, bridge: FleurDictBridge | null, prefetched?: { meaning: string; phonetic: string }): Promise<void> {
+		const norm = word.trim().toLowerCase();
+		if (!norm) return;
+		if (this.settings.wordbook.some((w) => w.word === norm)) {
+			new Notice(`"${norm}" 已在独立生词本中`, 2000);
+			return;
+		}
+		// 释义来源优先级：弹窗已查到的预取释义 > FleurDict 引擎查询 > 空串
+		const { meaning, phonetic } = prefetched ?? (bridge ? await queryMeaning(bridge, norm) : { meaning: '', phonetic: '' });
+		this.settings.wordbook.push({
+			word: norm,
+			meaning,
+			phonetic,
+			context: context?.trim() || undefined,
+			addedAt: new Date().toISOString(),
+		});
+		await this.saveSettings();
+		new Notice(`✓ "${norm}" 已加入 fleur-epub 独立生词本`, 2500);
+		// 词库变化广播：阅读视图监听后立即重扫 WordWise 注释（不等 3s 指纹轮询）
+		this.app.workspace.trigger('fleur-epub:wordbook-changed');
+	}
+
+	/** 删除独立生词本词条（生词本管理 Modal 用；广播事件让 WordWise 注释即时消失） */
+	async removeWordbookEntry(word: string): Promise<void> {
+		const before = this.settings.wordbook.length;
+		this.settings.wordbook = this.settings.wordbook.filter((w) => w.word !== word);
+		if (this.settings.wordbook.length === before) return;
+		await this.saveSettings();
+		new Notice(`已删除 "${word}"`, 2000);
+		this.app.workspace.trigger('fleur-epub:wordbook-changed');
+	}
+
+	/** 编辑独立生词本词条（按原词定位；word 字段允许改名） */
+	async updateWordbookEntry(originalWord: string, patch: { word: string; phonetic: string; meaning: string }): Promise<void> {
+		const entry = this.settings.wordbook.find((w) => w.word === originalWord);
+		if (!entry) return;
+		entry.word = patch.word;
+		entry.phonetic = patch.phonetic;
+		entry.meaning = patch.meaning;
+		await this.saveSettings();
+		this.app.workspace.trigger('fleur-epub:wordbook-changed');
+	}
+
+	/** 清空独立生词本（生词本管理 Modal 二次确认后调用） */
+	async clearWordbook(): Promise<void> {
+		this.settings.wordbook = [];
+		await this.saveSettings();
+		new Notice('独立生词本已清空', 2500);
+		this.app.workspace.trigger('fleur-epub:wordbook-changed');
 	}
 
 	async onload(): Promise<void> {
@@ -302,6 +360,8 @@ export default class FleurEpubPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, raw ?? {});
 		// 纯白主题已下线（与浅色几乎无差异），旧配置自动回落浅色
 		if ((this.settings.theme as string) === 'white') this.settings.theme = 'light';
+		// 查词来源去掉「跟随 FleurDict」选项（有用户未安装 FleurDict），旧值 auto 迁移为 youdao
+		if ((this.settings.dictSource as string) === 'auto') this.settings.dictSource = 'youdao';
 		// 迁移旧版单自定义提示词（customPrompt: string）→ 三槽（customPrompts: string[]）
 		const legacy = (this.settings as unknown as Record<string, unknown>).customPrompt;
 		if (typeof legacy === 'string' && legacy.trim()) {

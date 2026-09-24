@@ -33,6 +33,17 @@ Obsidian 的 EPUB 阅读插件，基于 foliate-js 渲染，延续 FleurPDF 的�
 
 一键开启对照翻译，译文直接嵌入原文段落下方（微信读书式）；自动识别语言——外语译为中文、文言文译为白话文；优先翻译当前阅读页，其余后台推进；译文按书缓存，重复阅读零消耗。
 
+### 4. Dictionary lookup & vocabulary · 词典查词与生词本
+
+- Select a word to look it up in a popup dictionary — Youdao (English–Chinese) or Free Dictionary API
+- **WordWise** — Kindle-style inline hints drawn above vocabulary words while you read (toggle in the reader toolbar)
+- Vocabulary notebook with built-in management (search / edit / delete / CSV export)
+- Optional sync with [FleurDict](https://github.com/gibsonchan-5/fleurdict); without it, a standalone notebook is used and everything still works
+
+选中单词即弹出查词卡（有道英汉词典或 Free Dictionary）；开启 WordWise 后，正文中的生词上方会直接绘制简要注释（Kindle 式，顶栏「注」开关）；生词本支持搜索、编辑、删除与 CSV 导出，也可选择与 FleurDict 同步——未安装 FleurDict 时使用独立生词本，功能不缺席。
+
+> **Privacy note · 隐私说明** — When you look up a word, only that word is sent to the chosen dictionary service (Youdao or dictionaryapi.dev). No other data is collected, and there is no telemetry. 查词时仅将所查单词发送至所选词典服务，不收集任何其他数据，无遥测上报。
+
 ## Other features · 其他能力
 
 - AI assistant via OpenAI-compatible providers (DeepSeek, GLM, Kimi, Qwen, Doubao, MiniMax...)

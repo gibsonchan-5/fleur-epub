@@ -542,6 +542,20 @@ export class AIChatPanel {
     // 重新生成
     mk('重新生成', '重新生成本回答', () => { void this.regenerate(); });
 
+    // AI 详解：仅翻译模式（对齐 FleurDict 翻译窗）——对原句做多维度讲解
+    if (this.mode === 'translate' && this.selectedText) {
+      mk('✨ AI 详解', '对原句进行语法、词汇、用法的详细讲解', () => {
+        if (this.isStreaming) return;
+        const question = `请对以下句子进行详细讲解：语法结构分析、关键词汇用法、需要注意的语言点，并给出类似结构的例句。\n\n「${this.selectedText}」`;
+        // 气泡只显示短标签（原句已在面板顶部展示），完整提示词仅进 chatHistory
+        const userBubble = this.bodyEl!.createDiv();
+        userBubble.addClass('fleur-ai-user-bubble');
+        userBubble.setText('✨ AI 详解');
+        this.chatHistory.push({ role: 'user', content: question });
+        void this.doStream();
+      });
+    }
+
     // 复制
     mk('复制', '复制回答', () => {
       void navigator.clipboard.writeText(this.rawMarkdown)

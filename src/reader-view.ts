@@ -5,7 +5,7 @@
 //   - 翻页模式：右击下一页、左击上一页（点按区域，不干扰选段），支持方向键
 // 继承 FileView：registerExtensions 接管 .epub 后，Obsidian 打开文件时回调 onLoadFile。
 
-import { EventRef, FileView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
+import { EventRef, Events, FileView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import { computeFingerprint, liveAnnotations, isAnnotationDeleted, type BookData, type BookMeta, type EpubAnnotation, type AnnotationKind, type SaveOutcome, type SaveScope } from './store';
 import { Overlayer } from '../vendor/foliate-js/overlayer.js';
@@ -19,6 +19,9 @@ import { outerGapAttrs } from './outer-gap';
 import { spacingCss, LETTER_SPACING_DEFAULT, LETTER_SPACING_MAX, WORD_SPACING_DEFAULT, WORD_SPACING_MIN, WORD_SPACING_MAX } from './spacing';
 import { MobileChrome } from './mobile-chrome';
 import { matchCatalogFont, FONT_CATALOG } from './font-library';
+import { getFleurDictBridge, isDictWord, type FleurDictBridge } from './dict-bridge';
+import { StandaloneDictPopup } from './standalone-dict';
+import { Wordwise } from './wordwise';
 import { ReaderTTS } from './tts';
 import { TTSPlayerModal } from './tts-player';
 import '../vendor/foliate-js/view.js';
@@ -249,9 +252,28 @@ export class EpubReaderView extends FileView {
 	private lastRelocateFrac: number | null = null;
 	private currentSelDoc: Document | null = null;
 	private selSnapshot = '';
+	/**
+	 * 当前章节文档（load 事件更新，与选区生命周期无关）。
+	 * 不能用 currentSelDoc 兼任：它会被 hideSelectionToolbar 无条件清空——
+	 * 点「译」弹查词窗后 currentSelDoc 即为 null，此时点「注」开关会因
+	 * 拿不到 doc 而无法挂载注释（表现为「开注后注释不出现」）。
+	 */
+	private chapterDoc: Document | null = null;
 	// ── 段落对照翻译 ──
 	private translator: TranslationEngine | null = null;
 	private translateBtn: HTMLElement | null = null;
+	// ── WordWise 生词注释（惰性创建：成员初始化早于 plugin 参数属性赋值） ──
+	private wordwiseBtn: HTMLElement | null = null;
+	private _wordwise: Wordwise | null = null;
+	private get wordwise(): Wordwise {
+		if (!this._wordwise) {
+			// chapterDoc 在每次章节 load 时更新 = 当前章节文档（选区无关）；
+			// foliate Paginator 是 closed shadow root，无法从 renderer 拿 doc。
+			// currentSelDoc 仅作兜底（load 前就有选区的极端时序）。
+			this._wordwise = new Wordwise(this.plugin, () => this.chapterDoc ?? this.currentSelDoc);
+		}
+		return this._wordwise;
+	}
 	// ── 移动端 chrome（底部工具栏 + 显隐状态机；桌面端为 null）──
 	private chrome: MobileChrome | null = null;
 	/** 移动端「听」（Web Speech API 朗读；桌面端为 null） */
@@ -366,6 +388,24 @@ export class EpubReaderView extends FileView {
 		}
 
 		right.appendChild(trBtn);
+
+		// WordWise 生词注释开关：开启后在正文生词上方绘制简要注释（Kindle 式）
+		const wwBtn = createSpan('fleur-epub-bar-btn fleur-epub-bar-btn-wordwise');
+		wwBtn.setText('注');
+		wwBtn.toggleClass('is-active', this.plugin.settings.wordwiseEnabled === true);
+		wwBtn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			const on = this.plugin.settings.wordwiseEnabled !== true;
+			this.plugin.settings.wordwiseEnabled = on;
+			void this.plugin.saveSettings();
+			wwBtn.toggleClass('is-active', on);
+			this.wordwise.setEnabled(on);
+			// 行距联动：WordWise 开启时排版 CSS 会对行距做最低保障（给注释留行间空间），
+			// 关闭时还原用户行距——必须重注入才生效（内部自带 scheduleRescan）
+			this.applyReaderStyles();
+		});
+		this.wordwiseBtn = wwBtn;
+		right.appendChild(wwBtn);
 		if (this.ttsBtn) right.appendChild(this.ttsBtn);
 
 		// 沉浸全屏（仅移动端）：隐藏 Obsidian 移动端顶部导航，阅读区铺满整屏
@@ -411,6 +451,15 @@ export class EpubReaderView extends FileView {
 		this.registerEvent(
 			this.app.workspace.on('css-change', () => {
 				if (this.foliateView) this.applyReaderStyles();
+			}),
+		);
+
+		// 独立生词本加词广播 → WordWise 立即重扫（注已开时新词注释马上出现，
+		// 不等 3s 指纹轮询；注未开时 scheduleRescan 内部直接跳过）。
+		// 自定义事件名不在 Workspace.on 的类型重载里，转基础 Events 类型（运行时同一实现）
+		this.registerEvent(
+			(this.app.workspace as unknown as Events).on('fleur-epub:wordbook-changed', () => {
+				this.wordwise.scheduleRescan();
 			}),
 		);
 
@@ -633,10 +682,13 @@ export class EpubReaderView extends FileView {
 				this.ttsBtn?.removeClass('is-active');
 				const doc = e.detail?.doc as Document | undefined;
 				if (doc) {
+					this.chapterDoc = doc;
 					this.bindDocEvents(doc);
 					// 清掉书内自带的 title 属性：许多 EPUB 在正文节点上带
 					// pagenumber 之类的 title，悬停会弹原生灰条提示，干扰阅读
 					doc.querySelectorAll('[title]').forEach((el) => el.removeAttribute('title'));
+					// WordWise 生词注释：新章节渲染后扫描绘制（内部幂等，开关关闭时直接跳过）
+					this.wordwise.attach(doc);
 				// 对照翻译开启时：新章节按「视口优先」续翻（最大单元仍是本章）
 				if (this.translator?.isActive() && doc.body?.textContent?.trim()) {
 					this.translator.scheduleFocus(doc);
@@ -902,6 +954,80 @@ export class EpubReaderView extends FileView {
 		});
 	}
 
+	// ════════ FleurDict 查词桥接（详见 dict-bridge.ts） ════════
+
+	/**
+	 * 查词：调 FleurDict 在选区旁弹查词窗（词典释义 + AI 详解 + 加入生词本）。
+	 * 词与上下文在点击的同步段先行捕获——工具条随即收起，异步段里选区快照可能已被清理。
+	 */
+	private async dictLookup(bridge: FleurDictBridge, host: { x: number; y: number }): Promise<void> {
+		const word = this.selSnapshot.trim();
+		if (!word) return;
+		const context = this.selSnapshot;
+		// 查词来源由 fleur-epub 设置固定指定（不跟随 FleurDict 设置，因部分用户未装 FleurDict）
+		const source = this.plugin.settings.dictSource;
+		const shown = await bridge.lookupWordAt(word.toLowerCase(), host.x, host.y, {
+			source,
+			onAddToWordbook: () => void this.addWordToWordbook(bridge, word, context),
+		});
+		if (!shown) new Notice('FleurDict 查询失败，请确认其已启用且网络可用', 3000);
+	}
+
+	/**
+	 * 内置独立查词（FleurDict 不在场时的降级路径）：有道 / Free Dictionary 直连。
+	 * 弹窗交互与 FleurDict 查词窗对齐（拖拽/缩放/记忆/AI 详解/生词本），
+	 * 释义复用弹窗查询结果，不二次请求。
+	 */
+	private standaloneLookup(host: { x: number; y: number }): void {
+		const word = this.selSnapshot.trim();
+		if (!word) return;
+		const context = this.selSnapshot;
+		let prefetched = { meaning: '', phonetic: '' };
+		new StandaloneDictPopup(this.plugin, {
+			x: host.x,
+			y: host.y,
+			word,
+			source: this.plugin.settings.dictSource,
+			// 弹窗查询完成后回填释义，供「＋ 生词本」落词时复用
+			onQueryResult: (entry) => {
+				if (!entry) return;
+				prefetched = {
+					meaning: entry.meanings
+						.map((m) => {
+							const defs = m.definitions.map((d) => d.definition).join('；');
+							return m.partOfSpeech && defs ? `${m.partOfSpeech} ${defs}` : defs;
+						})
+						.filter(Boolean)
+						.join('；'),
+					phonetic: entry.phonetics.find((p) => p.text)?.text ?? '',
+				};
+			},
+			// AI 详解：与工具条「AI」同管线（浮动面板、多轮追问），但不注入批注回调
+			onAIDetail: () => {
+				this.aiAnnotSeed = null;
+				new AIChatPanel(this.plugin, word, 'explain').open(host.x, host.y);
+			},
+			onAddToWordbook: () => {
+				// 独立查词的落词永远进本地词库（FleurDict 不在场，无从同步）
+				void this.plugin.addLocalWordbookEntry(word, context, null, prefetched);
+			},
+		}).open().catch(() => undefined);
+	}
+
+	/** 加入生词本：同步开 → FleurDict 全管线（含欧路同步）；同步关 → 独立生词本 */
+	private async addWordToWordbook(bridge: FleurDictBridge, word: string, context: string): Promise<void> {
+		try {
+			if (this.plugin.settings.dictSyncWordbook) {
+				await bridge.addToWordbook(word, context);
+			} else {
+				await this.plugin.addLocalWordbookEntry(word, context, bridge);
+			}
+		} finally {
+			// 加词后立即重扫：新注释马上出现在当前页（词库轮询是 3s 兜底，这里要即时）
+			this.wordwise.scheduleRescan();
+		}
+	}
+
 	/** 应用阅读模式（滚动 / 翻页）：设置 renderer 属性并刷新分段控件状态 */
 	private applyFlow(): void {
 		const flow = this.plugin.settings.flow;
@@ -918,6 +1044,10 @@ export class EpubReaderView extends FileView {
 				String(isMobileUI(this.plugin) ? PAGE_TURN_MS_MOBILE : PAGE_TURN_MS_DESKTOP),
 			);
 			this.applyColumnLayout();
+			// flow 切换是纯重排，foliate 不重派 load 事件 → wordwise 的 SVG 还留着
+			// 旧布局的 viewBox（翻页 = 多列总宽），必须显式重扫重画，否则注释被
+			// max-width 钳制等比缩小且坐标全错
+			this.wordwise.scheduleRescan();
 		}
 		this.modeBtnScroll.toggleClass('is-active', flow === 'scrolled');
 		this.modeBtnPage.toggleClass('is-active', flow === 'paginated');
@@ -1154,6 +1284,9 @@ export class EpubReaderView extends FileView {
 			// 左右外侧留白：foliate 内建的那圈白边（面板里任何一项都压不掉）的解法
 			this.applyOuterGap(renderer);
 		}
+		// 排版变化（字号/字重/行距/边距）→ 布局坐标全变：rAF 后重扫描注释
+		//（foliate setStyles 的重排可能在下一帧完成，同步读 rect 会拿到旧布局）
+		this.wordwise.scheduleRescan();
 	}
 
 	/** 上次写入渲染器的外侧留白三元组：值未变则不重复 render（滑块 input 很密） */
@@ -1223,11 +1356,21 @@ export class EpubReaderView extends FileView {
 				: w > 500
 					? `-webkit-text-stroke: 0.012em ${t.text};`
 					: '';
+		// WordWise 行距保障（Kindle 同款行为）：注释要画进行间，行距太紧必然压字。
+		// 开启时行距不低于 2.05（约需 2×half-leading ≥ 0.95×注释字号 + 余量），
+		// 关闭时严格还原用户行距。仅样式重排，不触碰 CFI 与分页数学。
+		// 注意：body 上的行距会被 EPUB 自带 CSS（p 级规则）覆盖，所以开启时
+		// 还要对段落级元素用 !important 钉住下限——注释画在段落行间，只管段落。
+		const lh = s.wordwiseEnabled === true ? Math.max(s.lineHeight, 2.05) : s.lineHeight;
+		const wwParaRule = s.wordwiseEnabled === true
+			? `p, li, dd { line-height: ${lh} !important; }`
+			: '';
 		// 字间距 / 单词间距：仍挂在 body 上（与改造前的锚点一致，避免 EPUB 自带
 		// body font-size 时 em 解析基准漂移）；h1 用 calc 保持「标题比正文更疏」并跟随滑块。
 		const sp = spacingCss(s.letterSpacing, s.wordSpacing);
 		return `
 			${fontFaces}
+			${wwParaRule}
 			/* text-size-adjust:100% —— iOS WebKit 的文字自动膨胀（font boosting）只作用于
 			   部分布局形态：滚动模式整幅宽栏会被放大、翻页模式窄栏不会被放大，
 			   表现为两种阅读模式字号不一致。锁死 100% 后两模式严格同字号。 */
@@ -1236,7 +1379,7 @@ export class EpubReaderView extends FileView {
 				font-family: ${bodyFont};
 				font-weight: ${w};
 				${synthStroke}
-				line-height: ${s.lineHeight};
+				line-height: ${lh};
 				${sp.body}
 				color: ${t.text};
 				background: ${t.bg} !important;
@@ -1849,9 +1992,24 @@ export class EpubReaderView extends FileView {
 			try { this.currentSelDoc?.getSelection()?.removeAllRanges(); } catch { /* 忽略 */ }
 			new AIChatPanel(this.plugin, this.selSnapshot, 'explain', (comment) => this.saveAIAnnotation(comment)).open(host.x, host.y);
 		});
-		mkBtn('译', '翻译本段（原文下方嵌入译文）', () => {
-			this.translateSelectionParagraph(doc);
-		});
+		// ── 译（整合按钮）：单词/短语 → 查词；句子 → AI 翻译 ──
+		// 查词/翻译分流：FleurDict 在场走桥接（FleurDict 全功能）；不在场走内置管线
+		//（查词 = 内置词典弹窗；翻译 = 自有 AI 翻译面板，窗内可 AI 详解），
+		// 两种模式的交互与桥接模式对齐，未安装 FleurDict 能力不缺席。
+		const dictBridge = getFleurDictBridge(this.plugin.app);
+		if (isDictWord(text) && dictBridge) {
+			mkBtn('译', '查词（FleurDict：词典释义 + AI 详解 + 加入生词本）', () => void this.dictLookup(dictBridge, host));
+		} else if (isDictWord(text)) {
+			mkBtn('译', '查词（内置词典：释义 + 发音 + AI 详解 + 加入生词本）', () => this.standaloneLookup(host));
+		} else if (dictBridge) {
+			mkBtn('译', 'AI 翻译选中文本（FleurDict，窗内可对整句 AI 详解）', () => {
+				this.plugin.app.workspace.trigger('fleurdict:ai-translate', this.selSnapshot);
+			});
+		} else {
+			mkBtn('译', 'AI 翻译选中文本（窗内可对整句 AI 详解）', () => {
+				new AIChatPanel(this.plugin, this.selSnapshot, 'translate').open(host.x, host.y);
+			});
+		}
 
 		// 右键处命中已有标注 → 工具条附加擦除项（对齐 fleur-pdf：清除项进右键菜单，不直接擦除）
 		if (eraseTargets.length > 0) {
@@ -2943,7 +3101,13 @@ export class EpubReaderView extends FileView {
 		};
 		// 序号分段：提取结果含多条脚注（无 id 平铺容器）时，按引用序号切出对应条目
 		const sliceByMarker = (full: string, want: number): string | null => {
-			const ms = Array.from(full.matchAll(/[(（[]?(\d{1,3})[)）\].、．]/g));
+			// 前一字符是数字的匹配一律剔除：序号正则的开括号可选，「（2016）」会切出
+			// 假标记「016）」（纯数字+闭括号），把本条脚注拦腰截断（置身事内即此案例）
+			const ms = Array.from(full.matchAll(/[(（[]?(\d{1,3})[)）\].、．]/g))
+				.filter((m) => {
+					const i = m.index ?? 0;
+					return i === 0 || !/\d/.test(full[i - 1]!);
+				});
 			if (ms.length < 2) return null;
 			const nums = ms.map((m) => parseInt(m[1]!, 10));
 			const idx = nums.indexOf(want);
@@ -3304,6 +3468,9 @@ export class EpubReaderView extends FileView {
 		this.ttsUnsub = null;
 		this.tts?.destroy();
 		this.tts = null;
+		this.wordwise.detach();
+		this._wordwise = null;
+		this.chapterDoc = null;
 		await this.teardownBook();
 		this.chrome?.destroy();
 		this.chrome = null;
