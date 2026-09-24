@@ -38,11 +38,64 @@ interface Token {
 	w: string;
 }
 
-/** 释义首段截断；空释义退化为音标 */
-function briefGloss(meaning: string | undefined, phonetic: string | undefined): string {
-	const seg = (meaning ?? '').split(/[；;\n。]/)[0].trim();
-	if (!seg) return (phonetic ?? '').trim();
+/** 释义首段截断；空释义退化为音标。字段来源含跨插件（FleurDict）数据，
+ *  一律先 String() 归一，脏类型在这里消化掉，不让单条数据炸断整库构建 */
+function briefGloss(meaning: unknown, phonetic: unknown): string {
+	let seg = '';
+	try {
+		seg = String(meaning ?? '').split(/[；;\n。]/)[0].trim();
+	} catch {
+		seg = '';
+	}
+	if (!seg) {
+		try {
+			return String(phonetic ?? '').trim();
+		} catch {
+			return '';
+		}
+	}
 	return seg.length > MAX_GLOSS_CHARS ? seg.slice(0, MAX_GLOSS_CHARS) + '…' : seg;
+}
+
+/** 诊断追踪：控制台执行 `__fleurEpubWWTrace = true` 开启。只输出日志，
+ *  不改变任何行为；用于真机排查「注释不显示」类问题（词库/命中/绘制全链路） */
+function wwTrace(msg: string, data?: Record<string, unknown>): void {
+	try {
+		if ((globalThis as { __fleurEpubWWTrace?: boolean }).__fleurEpubWWTrace === true) {
+			console.debug('[fleur-epub/ww]', msg, data ?? '');
+		}
+	} catch {
+		/* 忽略 */
+	}
+}
+
+/**
+ * iframe realm 的 setCssStyles 兜底。
+ * WordWise 的 SVG overlay 挂在 foliate 章节 iframe 的文档上——iframe 是独立的
+ * JS realm，其元素原型上没有 Obsidian 注入的 setCssStyles 扩展（该扩展只存在于
+ * 宿主文档）。0.2.41 为满足社区审核规则把直接样式写改成 setCssStyles 后，
+ * 每次绘制都抛 "is not a function"，注释全挂（探针因给 iframe 补了 polyfill 而
+ * 漏掉此问题）。这里在绘制前检测并补齐，实现与 Obsidian 完全一致
+ * （Object.assign(el.style, props)，camelCase 键），不触碰审核规则禁止的写法。
+ */
+function ensureCssHelpers(doc: Document): void {
+	try {
+		const w = doc.defaultView as (Window & Record<string, unknown>) | null;
+		if (!w) return;
+		const protos: Record<string, unknown>[] = [];
+		if (typeof w.HTMLElement === 'function') protos.push((w.HTMLElement as abstract new () => unknown).prototype as Record<string, unknown>);
+		if (typeof w.SVGElement === 'function') protos.push((w.SVGElement as abstract new () => unknown).prototype as Record<string, unknown>);
+		for (const p of protos) {
+			if (typeof p.setCssStyles !== 'function') {
+				p.setCssStyles = function (this: { style: CSSStyleDeclaration }, props: Record<string, string>) {
+					Object.assign(this.style, props);
+					return this;
+				};
+			}
+		}
+	} catch {
+		/* 跨 realm 访问异常时按原流程继续（真异常会由 attempt 的 catch 记录） */
+	}
 }
 
 /** 轻量词形归并：文章词形 → 生词本词形的候选序列（保守规则，宁缺勿滥） */
@@ -94,14 +147,20 @@ export class Wordwise {
 	 *  重建后比对指纹，词库有变（任一来源加词/改词）返回 true */
 	private buildGloss(): boolean {
 		const before = this.glossSig;
-		this.gloss.clear();
-		const push = (word: string, meaning: string | undefined, phonetic: string | undefined) => {
-			const w = word.trim().toLowerCase();
-			if (!w || w.length > 64) return;
-			const g = briefGloss(meaning, phonetic);
-			if (!g) return;
-			// 先到先得：FleurDict 词库优先（其词条带完整词典数据）
-			if (!this.gloss.has(w)) this.gloss.set(w, g);
+		// 原子构建：先组装到局部 Map，成功后才整体替换——任何词条数据异常
+		// （FleurDict 返回脏数据、字段缺失/类型不对）都不可能把现有词库清空
+		const next = new Map<string, string>();
+		const push = (word: unknown, meaning: unknown, phonetic: unknown) => {
+			try {
+				const w = String(word ?? '').trim().toLowerCase();
+				if (!w || w.length > 64) return;
+				const g = briefGloss(meaning, phonetic);
+				if (!g) return;
+				// 先到先得：FleurDict 词库优先（其词条带完整词典数据）
+				if (!next.has(w)) next.set(w, g);
+			} catch {
+				/* 单条脏数据只丢弃该条，不影响整库 */
+			}
 		};
 		const bridge = getFleurDictBridge(this.plugin.app);
 		try {
@@ -111,10 +170,16 @@ export class Wordwise {
 		} catch {
 			/* FleurDict 数据异常不阻断 */
 		}
-		for (const item of this.plugin.settings.wordbook ?? []) {
-			push(item.word, item.meaning, item.phonetic);
+		try {
+			for (const item of this.plugin.settings.wordbook ?? []) {
+				push(item.word, item.meaning, item.phonetic);
+			}
+		} catch {
+			/* 独立生词本数据异常不阻断 */
 		}
-		this.glossSig = [...this.gloss.keys()].sort().join('\u0001');
+		this.gloss = next;
+		this.glossSig = [...next.keys()].sort().join('\u0001');
+		wwTrace('buildGloss', { size: next.size, changed: this.glossSig !== before, bridge: !!bridge });
 		return this.glossSig !== before;
 	}
 
@@ -156,6 +221,7 @@ export class Wordwise {
 		this.detach();
 		this.doc = doc;
 		this.scan(doc);
+		wwTrace('attach', { gloss: this.gloss.size, matches: this.matches.length });
 		if (this.matches.length > 0) {
 			this.drawWhenLaidOut(doc);
 		}
@@ -180,8 +246,38 @@ export class Wordwise {
 		const attempt = () => {
 			this.drawTimer = null;
 			if (this.doc !== doc) return; // 已翻章 / 关闭 / detach
-			this.scan(doc); // 每次重扫：重排后节点位置缓存不可信
-			const drawn = this.draw(doc);
+			// 隐藏页（leaf 切走 / 折叠）布局全 0：不 scan 不 draw、不烧重试预算，
+			// 低频等待可见后继续（detach 时 doc 置空自动终止，无泄漏）。
+			// 否则 2s 预算在隐藏期烧完，回来后没有任何触发器重画 → 注释永久空白。
+			// 信号选择：display:none 下 getBoundingClientRect 必然为 0；html 与 body
+			// 取「与」——书内 CSS 可能把其中一个盒压成 0 宽，只有双双为 0 才算隐藏，
+			// 避免把正常可见页误判成隐藏导致绘制永远等待。
+			const de = doc.documentElement;
+			const deW = de ? de.getBoundingClientRect().width : 0;
+			const bW = doc.body ? doc.body.getBoundingClientRect().width : 0;
+			if (deW === 0 && bW === 0) {
+				wwTrace('attempt: hidden, waiting', { deW, bW });
+				this.drawTimer = window.setTimeout(attempt, 150);
+				return;
+			}
+			try {
+				this.scan(doc); // 每次重扫：重排后节点位置缓存不可信
+			} catch (e) {
+				// 扫描异常（脏数据/怪异 DOM）不炸断重试链：记日志、下一轮再试
+				wwTrace('attempt: scan threw', { err: String(e) });
+				this.drawTimer = window.setTimeout(attempt, 300);
+				return;
+			}
+			let drawn = 0;
+			try {
+				drawn = this.draw(doc);
+			} catch (e) {
+				// 绘制异常同理：保留旧注释（draw 内部清空在自检之后，异常时内容未动）
+				wwTrace('attempt: draw threw', { err: String(e) });
+				this.drawTimer = window.setTimeout(attempt, 300);
+				return;
+			}
+			wwTrace('attempt: drew', { drawn, matches: this.matches.length, gloss: this.gloss.size });
 			if (this.drawTries++ >= 50) return;
 			if (drawn === 0) {
 				// 有命中但画不出来 = 布局未完成，快速重试
@@ -365,6 +461,19 @@ export class Wordwise {
 		const rootEl = doc.documentElement;
 		const body = doc.body;
 		if (!rootEl || !body) return 0;
+		// iframe realm 可能缺 Obsidian 的 setCssStyles 原型扩展（0.2.41 真机回归根因），
+		// 绘制前确保可用（幂等，宿主文档不受影响）
+		ensureCssHelpers(doc);
+		const docW = Math.max(rootEl.scrollWidth, body.scrollWidth);
+		const docH = Math.max(rootEl.scrollHeight, body.scrollHeight);
+
+		// 隐藏页守卫（leaf 切走 / 面板折叠时布局全 0）：此时画必然画不出，
+		// 而清空动作会毁掉已有注释、回来后又没有触发器重画 → 直接跳过保留现状。
+		// 可见性恢复由 active-leaf-change / viewport 同步触发重扫补画。
+		if (docW === 0 || docH === 0) {
+			wwTrace('draw: hidden guard', { docW, docH });
+			return 0;
+		}
 
 		// overlay：absolute + 显式文档尺寸（100% 高度会塌缩到视口高）
 		if (!this.svg || !this.svg.isConnected) {
@@ -374,11 +483,11 @@ export class Wordwise {
 			body.appendChild(this.svg);
 		}
 		const svg = this.svg;
-		while (svg.firstChild) svg.removeChild(svg.firstChild);
-		if (this.matches.length === 0) return 0;
+		if (this.matches.length === 0) {
+			while (svg.firstChild) svg.removeChild(svg.firstChild);
+			return 0;
+		}
 
-		const docW = Math.max(rootEl.scrollWidth, body.scrollWidth);
-		const docH = Math.max(rootEl.scrollHeight, body.scrollHeight);
 		svg.setAttribute('width', String(docW));
 		svg.setAttribute('height', String(docH));
 		svg.setAttribute('viewBox', `0 0 ${docW} ${docH}`);
@@ -391,10 +500,17 @@ export class Wordwise {
 		// 返回 0 走 drawWhenLaidOut 的重试，等布局尘埃落定再画。
 		try {
 			const actualW = svg.getBoundingClientRect().width;
-			if (docW > 0 && Math.abs(actualW - docW) > 2) return 0;
+			if (docW > 0 && Math.abs(actualW - docW) > 2) {
+				wwTrace('draw: self-check bail', { docW, actualW });
+				return 0;
+			}
 		} catch {
 			/* getBoundingClientRect 异常时按原流程继续 */
 		}
+
+		// 自检通过、即将重建：此刻才清空旧内容（旧内容保留到最后一刻，
+		// 隐藏页/瞬态自检失败都不会把已有注释擦掉）
+		while (svg.firstChild) svg.removeChild(svg.firstChild);
 
 		// 注释字号跟随正文字号；颜色取正文色淡化（不引入固定色，兼容明暗书页）
 		let baseSize = 16;

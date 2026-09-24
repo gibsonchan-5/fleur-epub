@@ -463,6 +463,17 @@ export class EpubReaderView extends FileView {
 			}),
 		);
 
+		// 回到本书（桌面切 tab / 移动端切视图）→ 重扫补画：WordWise 在隐藏页
+		// 跳过绘制（见 wordwise 隐藏守卫），且隐藏期间 foliate 可能已重排，
+		// 可见后需要按新布局重画一次（scheduleRescan 内部自判开关状态，开销可忽略）
+		this.registerEvent(
+			this.app.workspace.on('active-leaf-change', () => {
+				if (this.app.workspace.getActiveViewOfType(EpubReaderView) === this) {
+					this.wordwise.scheduleRescan();
+				}
+			}),
+		);
+
 		// 移动端：创建底部工具栏并让 chrome 初始隐藏（沉浸开局，中央点按呼出）。
 		// 桌面端不实例化，此后的所有移动分支均以 this.chrome 是否存在为判断。
 		if (isMobileUI(this.plugin)) {
