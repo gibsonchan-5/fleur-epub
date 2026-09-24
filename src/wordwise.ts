@@ -370,11 +370,7 @@ export class Wordwise {
 		if (!this.svg || !this.svg.isConnected) {
 			this.svg = doc.createElementNS(SVG_NS, 'svg') as SVGSVGElement;
 			this.svg.setAttribute('class', 'fleur-epub-wordwise');
-			this.svg.style.setProperty('position', 'absolute');
-			this.svg.style.setProperty('top', '0');
-			this.svg.style.setProperty('left', '0');
-			this.svg.style.setProperty('pointer-events', 'none');
-			this.svg.style.setProperty('z-index', '5');
+			this.svg.setCssProps({ position: 'absolute', top: '0', left: '0', 'pointer-events': 'none', 'z-index': '5' });
 			body.appendChild(this.svg);
 		}
 		const svg = this.svg;
@@ -389,10 +385,7 @@ export class Wordwise {
 		// 关键：svg 的 width/height 属性会被宿主样式钳制（实测 height 被压到单页高），
 		// 触发 viewBox preserveAspectRatio 缩放+居中 → 注释整体错位。
 		// 用内联 style 强制 1:1 像素映射并禁用 max 钳制。
-		svg.style.setProperty('width', `${docW}px`);
-		svg.style.setProperty('height', `${docH}px`);
-		svg.style.setProperty('max-width', 'none');
-		svg.style.setProperty('max-height', 'none');
+		svg.setCssProps({ width: `${docW}px`, height: `${docH}px`, 'max-width': 'none', 'max-height': 'none' });
 		// 瞬态防御：flow 切换 / 重排中途布局坐标与文档尺寸可能来自旧状态，
 		// 若 svg 实际渲染宽 ≠ 期望宽（被宿主样式钳制等），此刻画出来必然错位缩放，
 		// 返回 0 走 drawWhenLaidOut 的重试，等布局尘埃落定再画。
@@ -487,7 +480,7 @@ export class Wordwise {
 			if (fam) t.setAttribute('font-family', fam);
 			t.setAttribute('fill', color);
 			t.setAttribute('fill-opacity', '0.8');
-			t.setAttribute('style', 'pointer-events:none');
+			t.setCssProps({ 'pointer-events': 'none' });
 			t.textContent = match.gloss;
 			svg.appendChild(t);
 			textEls.push(t);
@@ -518,7 +511,7 @@ export class Wordwise {
 			ul.setAttribute('stroke-opacity', '0.55');
 			ul.setAttribute('stroke-width', '1');
 			ul.setAttribute('stroke-dasharray', '2,2.6');
-			ul.setAttribute('style', 'pointer-events:none');
+			ul.setCssProps({ 'pointer-events': 'none' });
 			svg.appendChild(ul);
 		}
 		this.lastSig = sig.join('|');

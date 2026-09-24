@@ -173,12 +173,11 @@ export class StandaloneDictPopup {
 
 		const container = document.body.createDiv('fleur-epub-dict-popup');
 		this.container = container;
-		container.style.left = `${this.opts.x}px`;
-		container.style.top = `${this.opts.y}px`;
+		container.setCssStyles({ left: `${this.opts.x}px`, top: `${this.opts.y}px` });
 		// 查询完成、最终定位前保持不可见：否则弹窗先以原始坐标（选区左上角）
 		// 可见地挂出，查询返回后才 clampTo 归位 → 肉眼可见地「跳一下」。
 		// 与 FleurDict 桥接路径一致（查询完成后一次性落位显示）。
-		container.style.visibility = 'hidden';
+		container.setCssStyles({ visibility: 'hidden' });
 
 		const content = container.createDiv('fleur-epub-dict-content');
 
@@ -225,10 +224,9 @@ export class StandaloneDictPopup {
 		// ── 定位：有记忆位置则恢复（对齐 FleurDict），否则贴选区 ──
 		const rect = this.plugin.settings.dictPopupRect;
 		if (rect) {
-			container.style.left = `${rect.left}px`;
-			container.style.top = `${rect.top}px`;
-			if (rect.width > 0) container.style.width = `${rect.width}px`;
-			if (rect.height > 0) container.style.height = `${rect.height}px`;
+			container.setCssStyles({ left: `${rect.left}px`, top: `${rect.top}px` });
+			if (rect.width > 0) container.setCssStyles({ width: `${rect.width}px` });
+			if (rect.height > 0) container.setCssStyles({ height: `${rect.height}px` });
 		}
 
 		// ── 查询并渲染（意外异常也必须显示弹窗，不能永远隐形）──
@@ -248,7 +246,7 @@ export class StandaloneDictPopup {
 			// ── 记忆位置缺失时贴选区钳制落位；定位完成后一次性显示 ──
 			if (!rect) this.clampTo(this.opts.x, this.opts.y);
 		} finally {
-			if (!this.closed) container.style.visibility = '';
+			if (!this.closed) container.setCssStyles({ visibility: '' });
 		}
 
 		this.setupDrag(container);
@@ -326,8 +324,7 @@ export class StandaloneDictPopup {
 		left = Math.min(Math.max(margin, left), window.innerWidth - w - margin);
 		if (top + h > window.innerHeight - margin) top = y - h - 10;
 		top = Math.max(margin, top);
-		c.style.left = `${left}px`;
-		c.style.top = `${top}px`;
+		c.setCssStyles({ left: `${left}px`, top: `${top}px` });
 	}
 
 	/** 整窗拖拽（对齐 FleurDict：控件不触发、4px 阈值、拖完持久化） */
@@ -348,8 +345,7 @@ export class StandaloneDictPopup {
 					dragging = true;
 					document.body.addClass('fleur-epub-dict-dragging');
 				}
-				container.style.left = `${startLeft + ev.clientX - startX}px`;
-				container.style.top = `${startTop + ev.clientY - startY}px`;
+				container.setCssStyles({ left: `${startLeft + ev.clientX - startX}px`, top: `${startTop + ev.clientY - startY}px` });
 			};
 			const onUp = () => {
 				document.removeEventListener('mousemove', onMove);
@@ -376,8 +372,7 @@ export class StandaloneDictPopup {
 			const onMove = (ev: MouseEvent) => {
 				const w = Math.max(POPUP_MIN_W, startW + ev.clientX - startX);
 				const h = Math.max(POPUP_MIN_H, startH + ev.clientY - startY);
-				container.style.width = `${w}px`;
-				container.style.height = `${h}px`;
+				container.setCssStyles({ width: `${w}px`, height: `${h}px` });
 			};
 			const onUp = () => {
 				document.removeEventListener('mousemove', onMove);
