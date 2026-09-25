@@ -39,8 +39,9 @@ Obsidian 的 EPUB 阅读插件，基于 foliate-js 渲染，延续 FleurPDF 的�
 - **WordWise** — Kindle-style inline hints drawn above vocabulary words while you read (toggle in the reader toolbar)
 - Vocabulary notebook with built-in management (search / edit / delete / CSV export)
 - Optional sync with [FleurDict](https://github.com/gibsonchan-5/fleurdict); without it, a standalone notebook is used and everything still works
+- **Standalone notebook cross-device sync** — optionally stored inside the vault (`FleurEpub/data/wordbook.json`), merged across devices with tombstone-based deletion; data stays in your vault and only travels with your own sync service
 
-选中单词即弹出查词卡（有道英汉词典或 Free Dictionary）；开启 WordWise 后，正文中的生词上方会直接绘制简要注释（Kindle 式，顶栏「注」开关）；生词本支持搜索、编辑、删除与 CSV 导出，也可选择与 FleurDict 同步——未安装 FleurDict 时使用独立生词本，功能不缺席。
+选中单词即弹出查词卡（有道英汉词典或 Free Dictionary）；开启 WordWise 后，正文中的生词上方会直接绘制简要注释（Kindle 式，顶栏「注」开关）；生词本支持搜索、编辑、删除与 CSV 导出，也可选择与 FleurDict 同步——未安装 FleurDict 时使用独立生词本，功能不缺席。独立生词本还可选择跨设备同步：词条合并存入 Vault 内文件（删除走墓碑不会复活），数据只随你自己的同步服务流转。
 
 > **Privacy note · 隐私说明** — When you look up a word, only that word is sent to the chosen dictionary service (Youdao or dictionaryapi.dev). No other data is collected, and there is no telemetry. 查词时仅将所查单词发送至所选词典服务，不收集任何其他数据，无遥测上报。
 

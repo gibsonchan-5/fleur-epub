@@ -151,6 +151,12 @@ export interface FleurEpubSettings {
 	dictSyncWordbook: boolean;
 	/** 独立生词本（仅 dictSyncWordbook = false 时写入；存 data.json，跨设备随配置目录） */
 	wordbook: WordbookItem[];
+	/**
+	 * 独立生词本跨设备同步（默认关）。开启后 wordbook 双向合并到 Vault 内
+	 * `${dataDir}/wordbook.json`（随同步插件跨设备；删除走墓碑防复活），
+	 * data.json 仍作本机运行时数据与回退。每台设备需分别开启。
+	 */
+	wordbookSync: boolean;
 	/** WordWise 生词注释：开启后在正文生词上方绘制简要注释（词库 = FleurDict + 独立生词本合并） */
 	wordwiseEnabled: boolean;
 	/** 听书语速（播放器可调，持久化） */
@@ -196,6 +202,7 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	noteFolder: 'FleurEpub',
 	dataDir: 'FleurEpub/data',
 	syncDataToVault: false,
+	wordbookSync: false,
 	ttsVoiceURI: '',
 	ttsRate: 1,
 	ttsEngine: 'system',
@@ -457,6 +464,25 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 				);
 			}
 		}
+
+		// ── 独立生词本跨设备同步（与 FleurDict 同步互不相干：只管本插件的独立词库） ──
+		new Setting(containerEl)
+			.setName('生词本跨设备同步')
+			.setDesc(
+				'开启后，独立生词本双向同步到 Vault 内 FleurEpub/data/wordbook.json，可被 Remotely Save / iCloud 等同步到其他设备（增删改全同步，删除走墓碑不会复活；data.json 保留作本机回退）。' +
+					'需在每台设备上分别开启；仅 dictSyncWordbook 关闭（独立词库）时有意义。',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.wordbookSync ?? false).onChange(async (v) => {
+					this.plugin.settings.wordbookSync = v;
+					await this.plugin.saveSettings();
+					if (v) {
+						// 首次开启即迁移：把本机 data.json 里的存量词条合并进 vault 文件
+						const changed = await this.plugin.wordbookSync.pullAndMerge('local-change');
+						if (changed) this.plugin.app.workspace.trigger('fleur-epub:wordbook-changed');
+					}
+				}),
+			);
 
 		// ── 对照翻译 ──
 		new Setting(containerEl).setName('对照翻译').setHeading();

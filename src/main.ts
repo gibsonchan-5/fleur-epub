@@ -19,6 +19,7 @@ import {
 	type SecretBackend,
 } from './secret-store';
 import { applyMobileBodyClass, isMobileUI } from './platform';
+import { WordbookSync, type WordbookTombstone } from './wordbook-sync';
 
 export default class FleurEpubPlugin extends Plugin {
 	settings!: FleurEpubSettings;
@@ -36,6 +37,8 @@ export default class FleurEpubPlugin extends Plugin {
 	fontLibrary!: FontLibrary;
 	/** 插件内事件总线：阅读器 ↔ 侧边栏联动（批注变化 / 开书） */
 	events = new Events();
+	/** 独立生词本跨设备同步（wordbookSync 开关，默认关；详见 wordbook-sync.ts） */
+	wordbookSync = new WordbookSync(this.app, this);
 
 	/** 批注数据变化后广播（侧边栏刷新用） */
 	notifyAnnotationsChanged(): void {
@@ -76,17 +79,21 @@ export default class FleurEpubPlugin extends Plugin {
 		});
 		await this.saveSettings();
 		new Notice(`✓ "${norm}" 已加入 fleur-epub 独立生词本`, 2500);
+		await this.wordbookSync.push();
 		// 词库变化广播：阅读视图监听后立即重扫 WordWise 注释（不等 3s 指纹轮询）
 		this.app.workspace.trigger('fleur-epub:wordbook-changed');
 	}
 
 	/** 删除独立生词本词条（生词本管理 Modal 用；广播事件让 WordWise 注释即时消失） */
 	async removeWordbookEntry(word: string): Promise<void> {
+		const removed = this.settings.wordbook.find((w) => w.word === word);
 		const before = this.settings.wordbook.length;
 		this.settings.wordbook = this.settings.wordbook.filter((w) => w.word !== word);
 		if (this.settings.wordbook.length === before) return;
 		await this.saveSettings();
 		new Notice(`已删除 "${word}"`, 2000);
+		// 删除留墓碑：否则另一端合并时该词会被「复活」
+		await this.wordbookSync.push(removed ? [{ word: removed.word, deletedAt: removed.addedAt }] : []);
 		this.app.workspace.trigger('fleur-epub:wordbook-changed');
 	}
 
@@ -94,17 +101,23 @@ export default class FleurEpubPlugin extends Plugin {
 	async updateWordbookEntry(originalWord: string, patch: { word: string; phonetic: string; meaning: string }): Promise<void> {
 		const entry = this.settings.wordbook.find((w) => w.word === originalWord);
 		if (!entry) return;
+		const renamed = patch.word !== originalWord;
 		entry.word = patch.word;
 		entry.phonetic = patch.phonetic;
 		entry.meaning = patch.meaning;
 		await this.saveSettings();
+		// 改名 = 旧词留墓碑（否则另一端合并时新旧两词并存）；仅改释义不留
+		await this.wordbookSync.push(renamed ? [{ word: originalWord, deletedAt: entry.addedAt }] : []);
 		this.app.workspace.trigger('fleur-epub:wordbook-changed');
 	}
 
 	/** 清空独立生词本（生词本管理 Modal 二次确认后调用） */
 	async clearWordbook(): Promise<void> {
+		// 全部词条留墓碑：否则另一端同步会把清空「复活」回来
+		const deletions: WordbookTombstone[] = this.settings.wordbook.map((w) => ({ word: w.word, deletedAt: w.addedAt }));
 		this.settings.wordbook = [];
 		await this.saveSettings();
+		await this.wordbookSync.push(deletions);
 		new Notice('独立生词本已清空', 2500);
 		this.app.workspace.trigger('fleur-epub:wordbook-changed');
 	}
@@ -141,6 +154,9 @@ export default class FleurEpubPlugin extends Plugin {
 		// 指纹迁移：旧版 identifier 撞号（z-lib 通用 UUID）修复后，按新算法重命名历史数据文件
 		// （数据目录跟随「跨设备同步批注数据」开关：开启后在 Vault 内，关闭时在配置目录）
 		await this.migrateBookFingerprints();
+
+		// 独立生词本跨设备同步：注册 vault modify 监听 + 启动合并（开关关闭时内部直接跳过）
+		this.wordbookSync.init();
 
 		this.registerView(VIEW_TYPE_EPUB, (leaf: WorkspaceLeaf) =>
 			new EpubReaderView(leaf, this),
