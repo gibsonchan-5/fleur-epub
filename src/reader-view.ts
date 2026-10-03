@@ -694,6 +694,9 @@ export class EpubReaderView extends FileView {
 				const doc = e.detail?.doc as Document | undefined;
 				if (doc) {
 					this.chapterDoc = doc;
+					// 古籍注码图标修复（外科版）：抢救书内「图片尺寸类」CSS 后再绑交互。
+					// 异步、内部全兜底，失败时静默降级为回滚前的现状
+					void this.inlineBookImageSizeCss(doc);
 					this.bindDocEvents(doc);
 					// 清掉书内自带的 title 属性：许多 EPUB 在正文节点上带
 					// pagenumber 之类的 title，悬停会弹原生灰条提示，干扰阅读
@@ -1330,6 +1333,110 @@ export class EpubReaderView extends FileView {
 		// （只有 flow / max-inline-size 会），滚动模式下 html padding 靠 render 才刷新。
 		// max-inline-size 分支内部已 render 一次，这里再调一次是幂等的。
 		r.render?.();
+	}
+
+	/**
+	 * 古籍注码图标修复（外科版）。
+	 *
+	 * 背景：Obsidian 桌面端 CSP 的 style-src 不含 blob:，foliate 把书内
+	 * <link rel=stylesheet> 改写为 blob: URL 后整体被拦——duokan 系古籍的
+	 * 注码 / 生僻字 / 行内公式是行内 PNG，尺寸全靠书内 CSS（如
+	 * `.cn_rarefont { height: 1em }`）钉住，拦截后按图片原始像素渲染，
+	 * 一个图标盖半页。
+	 *
+	 * 整表内联不可行（已实测回滚）：书内的字体 / 缩进类规则会以类选择器
+	 * 压过用户排版（京华老宋被书内楷体覆盖）。故这里只「抢救」图片尺寸
+	 * 规则：提取声明了 width/height/max/min 维度或 vertical-align、且选择器
+	 * 命中元素全部为替换型媒体元素（img/svg/video/embed/object）的规则
+	 * 内联，其余书内样式维持被拦现状，用户排版基线逐像素不变。
+	 */
+	private async inlineBookImageSizeCss(doc: Document): Promise<void> {
+		try {
+			if (doc.querySelector('style[data-fleur-book-img]')) return; // 幂等
+			const links = Array.from(doc.querySelectorAll('link[rel~="stylesheet"][href]'));
+			if (!links.length) return;
+			const texts = await Promise.all(links.map(async (link) => {
+				const href = link.getAttribute('href') || '';
+				if (!href.startsWith('blob:')) return null; // 外链样式不碰
+				try {
+					const res = await fetch(href);
+					return res.ok ? await res.text() : null;
+				} catch {
+					return null; // 取不到就维持现状（图标表现与修复前一致）
+				}
+			}));
+			const snippets = texts
+				.filter((t): t is string => !!t)
+				.map((t) => this.extractImageSizeRules(t, doc))
+				.filter((t) => t.trim());
+			if (!snippets.length) return;
+			const style = doc.createElement('style');
+			style.setAttribute('data-fleur-book-img', '');
+			style.textContent = snippets.join('\n');
+			doc.head.appendChild(style);
+			// 图片尺寸变化影响分页：重算页数（expand 内有空文档守卫，幂等）
+			(this.foliateView?.renderer as any)?.expand?.();
+		} catch {
+			// 任何异常都静默降级为「不修复」，绝不影响阅读主流程
+		}
+	}
+
+	/**
+	 * 从书内 CSS 文本提取「图片尺寸类规则」。
+	 * 只认声明了 width/height/max/min 维度或 vertical-align 的规则，并要求选择器
+	 * 命中的元素全部为替换型媒体元素（用 querySelectorAll 实测，不靠选择器
+	 * 文本猜——duokan 用的正是 .cn_rarefont 这种不含 img 字样的类名）。
+	 * 支持 @media / @supports 内层规则（忽略条件本身，尺寸规则下基本等价）。
+	 */
+	private extractImageSizeRules(cssText: string, doc: Document): string {
+		const DIM_PROP = /^\s*(?:max-|min-)?(?:width|height)\s*:|^\s*vertical-align\s*:/;
+		const hasDim = (body: string) => body.split(';').some((d) => DIM_PROP.test(d));
+		const isMediaOnlySelector = (sel: string): boolean => {
+			try {
+				const els = doc.querySelectorAll(sel);
+				if (!els.length) return false;
+				const win = doc.defaultView;
+				if (!win) return false;
+				return Array.from(els).every((el) =>
+					el instanceof win.HTMLImageElement
+					|| el instanceof win.SVGSVGElement
+					|| el instanceof win.HTMLVideoElement
+					|| el instanceof win.HTMLEmbedElement
+					|| el instanceof win.HTMLObjectElement);
+			} catch {
+				return false; // 非法选择器一律不收
+			}
+		};
+
+		const walk = (css: string, out: string[]): void => {
+			const src = css.replace(/\/\*[\s\S]*?\*\//g, ''); // 去注释
+			let i = 0;
+			while (i < src.length) {
+				const at = src.indexOf('{', i);
+				if (at < 0) break;
+				const prelude = src.slice(i, at).trim();
+				let depth = 1;
+				let j = at + 1;
+				while (j < src.length && depth > 0) {
+					const ch = src[j];
+					if (ch === '{') depth++;
+					else if (ch === '}') depth--;
+					j++;
+				}
+				const block = src.slice(at + 1, depth === 0 ? j - 1 : j);
+				if (/^@(media|supports)\b/.test(prelude)) {
+					walk(block, out); // 递归取内层规则
+				} else if (prelude.startsWith('@')) {
+					// @font-face / @keyframes 等：与图片尺寸无关，跳过
+				} else if (prelude && hasDim(block) && isMediaOnlySelector(prelude)) {
+					out.push(`${prelude}{${block.trim()}}`);
+				}
+				i = depth === 0 ? j : src.length;
+			}
+		};
+		const out: string[] = [];
+		walk(cssText, out);
+		return out.join('\n');
 	}
 
 	/** 微信读书 / Apple Books 风格排版 CSS（fontSize 为根字号，其余全 em 缩放） */
