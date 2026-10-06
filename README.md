@@ -50,11 +50,14 @@ Obsidian 的 EPUB 阅读插件，基于 foliate-js 渲染，延续 FleurPDF 的�
 - AI assistant via OpenAI-compatible providers (DeepSeek, GLM, Kimi, Qwen, Doubao, MiniMax...)
 - Export annotations to Markdown notes
 - Progress memory — reopen a book exactly where you left off
+- **Desktop footnote popup** — optional (off by default): tapping a footnote marker opens a WeChat-Reading-style card with the note text instead of jumping to the note's location; mobile always uses the popup. When enabled, the card appears only for links recognized as footnotes — every other in-book link keeps navigating as before
 - **Classic-book compatibility** — some Chinese classics (duokan-style EPUBs) render footnote markers, rare characters and inline formulas as small images sized by the book's own CSS (e.g. `height: 1em`). Since Obsidian's CSP blocks the book's blob-URL stylesheets, FleurEPUB recovers only those image-sizing rules (selectors that exclusively match `img`/`svg`/`video`/`embed`/`object` and declare width/height/vertical-align) and re-injects them inline, so icons render at their intended one-em size. Your typography settings (font, size, line-height) always take precedence; no text styles from the book are restored, and every step fails silently back to the previous behavior.
 
 支持 OpenAI 兼容接口（DeepSeek、智谱、Kimi、通义、豆包、MiniMax 等）；批注可导出为 Markdown 笔记；阅读进度记忆，重开即续读。
 
 **古籍兼容性**：部分中文古籍（duokan 工艺 EPUB）的注码、生僻字、行内公式是靠书内 CSS 钉尺寸的行内小图（如 `height: 1em`）。由于 Obsidian 的 CSP 会拦截书内的 blob 样式表，FleurEPUB 只恢复其中「图片尺寸类」规则（选择器仅命中 img/svg/video/embed/object 且声明了宽高或垂直对齐），将其内联注入，使图标回到一个字的大小。你的排版设置（字体、字号、行距）始终优先，书内文字样式一概不恢复，任何一步失败都会静默退回原有表现。
+
+**桌面端脚注弹卡**：可选开关（默认关闭）。开启后点击书内注码 /「注」图标会弹出微信读书式的注解内容卡，而非跳转到注解所在位置；移动端始终弹卡。开启后也只对识别为脚注的链接弹卡，其余书内链接保持原跳转行为。
 
 ## Install
 

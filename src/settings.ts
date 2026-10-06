@@ -34,6 +34,12 @@ export interface FleurEpubSettings {
 	flow: 'scrolled' | 'paginated';
 	/** 翻页模式分栏数：1 = 单栏（默认），2 = 双栏 */
 	columns: 1 | 2;
+	/**
+	 * 桌面端脚注弹卡（默认关）。开启后桌面端点击书内脚注引用（注码/「注」图标）弹注解
+	 * 内容卡（微信读书式，与移动端同源逻辑）；关闭则保持原行为——跳转到注解所在位置。
+	 * 移动端不受此项影响（始终弹卡）。
+	 */
+	footnotePopupOnDesktop: boolean;
 	// ── 阅读外观（顶栏 Aa 面板，微信读书式） ──
 	/** 背景主题 */
 	theme: ReaderTheme;
@@ -167,6 +173,7 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	fontSize: 16,
 	flow: 'scrolled',
 	columns: 1,
+	footnotePopupOnDesktop: false,
 	theme: 'light',
 	pageMargin: 36,
 	marginLeft: 0,
@@ -271,6 +278,18 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 						this.plugin.settings.columns = v === '2' ? 2 : 1;
 						await this.plugin.saveSettings();
 						this.plugin.getActiveReader()?.applyColumnLayout();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('脚注弹卡（桌面端）')
+			.setDesc('开启后点击书内注码/「注」图标弹注解内容卡（微信读书式）；关闭则点击后跳转到注解所在位置。移动端始终弹卡，不受此项影响。')
+			.addToggle((tg) =>
+				tg
+					.setValue(this.plugin.settings.footnotePopupOnDesktop)
+					.onChange(async (v) => {
+						this.plugin.settings.footnotePopupOnDesktop = v;
+						await this.plugin.saveSettings();
 					}),
 			);
 

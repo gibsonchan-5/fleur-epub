@@ -743,13 +743,14 @@ export class EpubReaderView extends FileView {
 				this.showAnnotationViewer(ann, dhost.x, dhost.y);
 			});
 
-			// 书内链接：移动端接管为「微信读书式脚注弹卡」——先 preventDefault 拿下控制权，
+			// 书内链接接管（微信读书式脚注弹卡）——先 preventDefault 拿下控制权，
 			// 再异步分级（脚注/尾注 → 内容卡片弹窗；其余链接自行 goTo 保持跳转）。
 			// 不能放行默认跳转再异步弹卡，否则脚注会「跳转 + 弹卡」双触发。
-			// 桌面端不接管、不弹脚注卡：放行后由 foliate 自己 goTo(href)，
+			// 移动端始终接管；桌面端按设置开关（footnotePopupOnDesktop，默认关）：
+			// 关闭时不接管，放行后由 foliate 自己 goTo(href)，
 			// 即原有的定向锚点跳转（滚动 / 翻页两种模式表现一致）。
 			view.addEventListener('link', (e: CustomEvent) => {
-				if (!isMobileUI(this.plugin)) return;
+				if (!isMobileUI(this.plugin) && !this.plugin.settings.footnotePopupOnDesktop) return;
 				e.preventDefault();
 				void this.handleBookLink(e.detail?.a, e.detail?.href);
 			});
@@ -1612,7 +1613,16 @@ export class EpubReaderView extends FileView {
 			}
 			// 点击空白处收起浮层
 			this.hideSelectionToolbar();
-			this.hideAnnPopup();
+			// 桌面端「脚注弹卡」开启时，同一点击会先经 foliate 的 link 接管**同步**弹出
+			// 脚注卡（foliate 的章节 click 监听器先于本监听器注册），随后轮到本监听器——
+			// 若无条件 hideAnnPopup 会把刚弹的卡当场拆掉，表现为「点注解没反应」
+			// （preventDefault 已拦下默认跳转，连跳转也没有）。判定用「点击落在书内
+			// 链接上 + 弹窗刚弹出（<100ms）」，与上方 overlayer hitTest 守卫同语义；
+			// 移动端 chrome 路由在本方法前段已提前 return，不经过此处。
+			const tapOnLink = (e.target as HTMLElement).closest?.('a[href]');
+			if (!(tapOnLink && this.annPopup && Date.now() - this.annPopupShownAt < 100)) {
+				this.hideAnnPopup();
+			}
 			if (this.plugin.settings.flow !== 'paginated') return;
 			const target = e.target as HTMLElement;
 			// 交互元素放行：链接 / 按钮 / 可点击元素
@@ -3196,7 +3206,9 @@ export class EpubReaderView extends FileView {
 			const lines = blocks.length
 				? blocks.map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)
 				: [(clone.textContent ?? '').replace(/\s+/g, ' ').trim()];
-			return lines.filter(Boolean).join('\n');
+			// 相邻去重：嵌套块（aside > ol > li > p）会让父块与子块各收一遍同一文字
+			//（以利为利/掌阅系 aside[id] 内 li[id] 即此形态），表现为卡片正文重复两遍
+			return lines.filter((l, i) => i === 0 || l !== lines[i - 1]).join('\n');
 		};
 		// 纯序号形态：「(1)」「[2]」「*」「①」等——说明锚点落在词典 dt / 独立标记节点上
 		const isMarkerOnly = (t: string) => this.isMarkerOnlyText(t);
