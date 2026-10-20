@@ -17,7 +17,16 @@
 import type { App } from 'obsidian';
 
 /** Settings fields that must never be persisted as plain text on the keychain backend. */
-export const SECRET_FIELDS = ['apiKey', 'ttsOnlineApiKey'] as const;
+export const SECRET_FIELDS = [
+  'apiKey',
+  // 旧版单一在线语音密钥（保留读取，迁移后不再写入）
+  'ttsOnlineApiKey',
+  'ttsOpenaiApiKey',
+  'ttsSiliconflowApiKey',
+  'ttsDoubaoApiKey',
+  'ttsQwenApiKey',
+  'ttsCustomApiKey',
+] as const;
 
 export type SecretField = typeof SECRET_FIELDS[number];
 
@@ -31,6 +40,11 @@ export type SecretBackend = 'system' | 'vault';
 export const SECRET_IDS: Record<SecretField, string> = {
   apiKey: 'fleur-epub-api-key',
   ttsOnlineApiKey: 'fleur-epub-tts-api-key',
+  ttsOpenaiApiKey: 'fleur-epub-tts-openai-key',
+  ttsSiliconflowApiKey: 'fleur-epub-tts-siliconflow-key',
+  ttsDoubaoApiKey: 'fleur-epub-tts-doubao-key',
+  ttsQwenApiKey: 'fleur-epub-tts-qwen-key',
+  ttsCustomApiKey: 'fleur-epub-tts-custom-key',
 };
 
 interface SecretStorageLike {
@@ -151,8 +165,8 @@ export async function hydrateSecrets(
       }
     }
 
-    const inSettings = typeof settings[field] === 'string' ? (settings[field] as string) : '';
-    const onDisk = typeof legacy?.[field] === 'string' ? (legacy[field] as string) : '';
+    const inSettings = typeof settings[field] === 'string' ? settings[field] : '';
+    const onDisk = typeof legacy?.[field] === 'string' ? legacy[field] : '';
     const plain = inSettings || onDisk;
     if (!plain) continue;
 
@@ -186,7 +200,7 @@ export async function scrubSecretsForPersistence(
   if (backend === 'vault') return persisted;
 
   for (const field of SECRET_FIELDS) {
-    const value = typeof settings[field] === 'string' ? (settings[field] as string) : '';
+    const value = typeof settings[field] === 'string' ? settings[field] : '';
     if (!value) {
       persisted[field] = '';
       continue;
@@ -224,7 +238,7 @@ export async function migrateSecrets(
   const failed: SecretField[] = [];
 
   for (const field of SECRET_FIELDS) {
-    const value = typeof settings[field] === 'string' ? (settings[field] as string) : '';
+    const value = typeof settings[field] === 'string' ? settings[field] : '';
     if (!value) continue;
 
     if (target === 'vault') {

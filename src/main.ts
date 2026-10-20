@@ -19,7 +19,9 @@ import {
 	type SecretBackend,
 } from './secret-store';
 import { applyMobileBodyClass, isMobileUI } from './platform';
+import { clearReaderFocus } from './focus';
 import { WordbookSync, type WordbookTombstone } from './wordbook-sync';
+import { TTS_PROVIDERS, normalizeVoiceId, setProviderConfig } from './tts-providers';
 
 export default class FleurEpubPlugin extends Plugin {
 	settings!: FleurEpubSettings;
@@ -368,6 +370,8 @@ export default class FleurEpubPlugin extends Plugin {
 
 	onunload(): void {
 		this.coverCache?.dispose();
+		// 兜底：视图 onClose 未跑到时也要把宿主 chrome 恢复出来
+		clearReaderFocus();
 		// Obsidian 会自动 detach 我们注册的视图 leaf；无需手工清理
 	}
 
@@ -403,6 +407,38 @@ export default class FleurEpubPlugin extends Plugin {
 			raw,
 			this.secretBackend,
 		);
+		// 旧版只有一个在线语音密钥：迁到 OpenAI 字段（其余提供商不借用别人的密钥）。
+		if (!this.settings.ttsOpenaiApiKey && this.settings.ttsOnlineApiKey) {
+			this.settings.ttsOpenaiApiKey = this.settings.ttsOnlineApiKey;
+		}
+		// 未知提供商回落到 OpenAI，避免播放器拿着空配置找不到入口
+		if (!TTS_PROVIDERS[this.settings.ttsOnlineProvider as keyof typeof TTS_PROVIDERS]) {
+			this.settings.ttsOnlineProvider = 'openai';
+		}
+		// 旧版豆包音色 id 更正（知性女声 zhixingnvsheng → zhixingnv）
+		this.settings.ttsOnlineVoice = normalizeVoiceId(
+			this.settings.ttsOnlineProvider,
+			this.settings.ttsOnlineVoice,
+		);
+		// 旧版把接口/模型放在全局字段里。升级后只把它交给当前 OpenAI 兼容提供商，
+		// 豆包/千问固定用预设端点与资源 ID，避免别家的旧值被带过去。
+		this.settings.ttsProviderConfigs = { ...(this.settings.ttsProviderConfigs ?? {}) };
+		const currentProvider = this.settings.ttsOnlineProvider as keyof typeof TTS_PROVIDERS;
+		if (
+			(currentProvider === 'openai' || currentProvider === 'siliconflow') &&
+			!this.settings.ttsProviderConfigs[currentProvider] &&
+			(this.settings.ttsOnlineBaseUrl || this.settings.ttsOnlineModel)
+		) {
+			const preset = TTS_PROVIDERS[currentProvider];
+			const legacyBase = (this.settings.ttsOnlineBaseUrl || '').trim();
+			// SiliconFlow 只在旧值确实指向自家端点时才认领，防止把 OpenAI 的存值搬过去
+			if (currentProvider === 'openai' || !legacyBase || legacyBase === preset.baseUrl) {
+				setProviderConfig(this.settings, currentProvider, {
+					baseUrl: this.settings.ttsOnlineBaseUrl,
+					model: this.settings.ttsOnlineModel,
+				});
+			}
+		}
 		if (secretState.migrated.length > 0) {
 			await this.saveSettings();
 			new Notice('FleurEPUB：API Key 已移入系统钥匙串，data.json 中不再保存明文');

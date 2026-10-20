@@ -4,7 +4,17 @@ import { PROMPT_PRESETS, getPromptPreset, getPresetPreview, isCustomPresetKey, A
 import { collectFolderPaths } from './folders';
 import { FontLibraryModal } from './font-library';
 import { ReaderTTS } from './tts';
-import { ONLINE_TTS_PRESETS } from './tts-online';
+import { synthesizeOnline } from './tts-online';
+import {
+	TTS_PROVIDERS,
+	applyVoiceSelection,
+	currentSelectionKey,
+	isCloudProvider,
+	providerApiKey,
+	providerConfig,
+	providerPreset,
+	setProviderConfig,
+} from './tts-providers';
 import { getFleurDictBridge } from './dict-bridge';
 import { WordbookManagerModal } from './wordbook-manager-modal';
 
@@ -138,14 +148,28 @@ export interface FleurEpubSettings {
 	 * 系统引擎不可用的平台（安卓）会自动按 online 处理。
 	 */
 	ttsEngine: 'system' | 'online';
-	/** 在线语音提供商预设键（openai / siliconflow / custom） */
+	/** 在线语音提供商预设键（openai / siliconflow / doubao / qwen / custom） */
 	ttsOnlineProvider: string;
-	/** 在线语音接口 Base URL（OpenAI 兼容，末尾不带 /） */
+	/** 在线语音接口 Base URL（OpenAI 兼容，末尾不带 /；豆包/千问使用固定端点，此项仅自定义时生效） */
 	ttsOnlineBaseUrl: string;
-	/** 在线语音密钥（与 AI 密钥同策略存储） */
+	/** 旧版单一在线语音密钥（仅作迁移与兼容回退，新配置按提供商分字段保存） */
 	ttsOnlineApiKey: string;
-	/** 在线语音模型（如 tts-1 / FunAudioLLM/CosyVoice2-0.5B） */
+	/** 各提供商的独立密钥（与 AI 密钥同策略存储） */
+	ttsOpenaiApiKey: string;
+	ttsSiliconflowApiKey: string;
+	ttsDoubaoApiKey: string;
+	ttsQwenApiKey: string;
+	ttsCustomApiKey: string;
+	/** 在线语音模型（如 tts-1 / FunAudioLLM/CosyVoice2-0.5B / qwen3-tts-flash） */
 	ttsOnlineModel: string;
+	/**
+	 * 各在线语音提供商的接口地址与模型覆盖（按 provider 分键）。
+	 * 缺省值来自 TTS_PROVIDERS 预设；自定义服务仍沿用上方 ttsOnlineBaseUrl/Model。
+	 */
+	ttsProviderConfigs: Record<
+		string,
+		{ baseUrl?: string; model?: string; channel?: 'standard' | 'agentplan' }
+	>;
 	/** 在线语音音色 id */
 	ttsOnlineVoice: string;
 	// ── 词典查词（桥接 FleurDict，需 FleurDict ≥ 1.5.12；未安装时相关按钮不渲染） ──
@@ -216,8 +240,14 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	ttsOnlineProvider: 'openai',
 	ttsOnlineBaseUrl: 'https://api.openai.com/v1',
 	ttsOnlineApiKey: '',
+	ttsOpenaiApiKey: '',
+	ttsSiliconflowApiKey: '',
+	ttsDoubaoApiKey: '',
+	ttsQwenApiKey: '',
+	ttsCustomApiKey: '',
 	ttsOnlineModel: 'tts-1',
 	ttsOnlineVoice: 'alloy',
+	ttsProviderConfigs: {},
 };
 
 export class FleurEpubSettingTab extends PluginSettingTab {
@@ -787,158 +817,335 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 				}, 3000);
 			});
 		});
-		// ── 听书（引擎 / 在线语音配置） ──
+		// ── 听书（统一声音 / 云端密钥） ──
 		new Setting(containerEl).setName('听书').setHeading();
 
+		const settings = this.plugin.settings;
 		const systemTtsOk = ReaderTTS.supported();
-		new Setting(containerEl)
-			.setName('朗读引擎')
-			.setDesc(
-				systemTtsOk
-					? '系统语音免费离线，随系统音色；在线语音需网络与密钥，音色更好。安卓 WebView 不提供系统语音 API，会自动使用在线语音。'
-					: '当前平台（安卓 WebView）不提供系统语音 API，只能使用在线语音；请填写下方的接口地址与密钥。',
-			)
-			.addDropdown((drop) =>
-				drop
-					.addOption('system', '系统语音（免费离线）')
-					.addOption('online', '在线语音（需网络与密钥）')
-					.setValue(this.plugin.settings.ttsEngine)
-					.onChange(async (v) => {
-						this.plugin.settings.ttsEngine = v === 'online' ? 'online' : 'system';
-						await this.plugin.saveSettings();
-						this.display();
-					}),
-			);
-
-		if (!systemTtsOk && this.plugin.settings.ttsEngine === 'system') {
-			containerEl.createEl('p', {
-				text: '提示：本平台无法使用系统语音，实际朗读会自动改用在线语音（需下方配置）。',
-				cls: 'setting-item-description mod-warning',
-			});
+		const systemVoices = this.systemVoices();
+		// Chrome 首次 getVoices() 常为空，声源到达后重绘一次（只挂一次）
+		if (systemTtsOk && !systemVoices.length) {
+			const onVoices = () => {
+				window.speechSynthesis?.removeEventListener?.('voiceschanged', onVoices);
+				this.display();
+			};
+			window.speechSynthesis?.addEventListener?.('voiceschanged', onVoices);
 		}
 
 		new Setting(containerEl)
-			.setName('在线语音提供商')
-			.setDesc('均为 OpenAI 兼容的 /audio/speech 接口；切换后自动填入该家的接口地址、模型与默认音色')
+			.setName('默认朗读声音')
+			.setDesc(
+				systemTtsOk
+					? '系统声音免费离线；云端声音更自然，需填写对应密钥。播放器里也可随时切换。'
+					: '当前平台不提供系统声音；请选择云端声音并填写对应密钥。播放器里也可随时切换。',
+			)
 			.addDropdown((drop) => {
-				for (const [key, preset] of Object.entries(ONLINE_TTS_PRESETS)) {
-					drop.addOption(key, preset.label);
+				const seen = new Set<string>();
+				const add = (value: string, label: string) => {
+					if (seen.has(value)) return;
+					seen.add(value);
+					drop.addOption(value, label);
+				};
+				if (systemTtsOk) {
+					add('system:', '系统 · 自动（跟随章节语言）');
+					for (const v of systemVoices) {
+						add(`system:${v.voiceURI}`, `系统 · ${v.name}（${v.lang}）`);
+					}
 				}
-				drop.setValue(this.plugin.settings.ttsOnlineProvider).onChange(async (v) => {
-					this.plugin.settings.ttsOnlineProvider = v;
-					const preset = ONLINE_TTS_PRESETS[v];
-					if (preset) {
-						this.plugin.settings.ttsOnlineBaseUrl = preset.baseUrl;
-						this.plugin.settings.ttsOnlineModel = preset.model;
-						if (preset.voices[0]) this.plugin.settings.ttsOnlineVoice = preset.voices[0].id;
+				for (const preset of Object.values(TTS_PROVIDERS)) {
+					for (const v of preset.voices) {
+						add(
+							`${preset.id}:${v.id}`,
+							`${preset.shortLabel} · ${v.label}${v.note ? `（${v.note}）` : ''}`,
+						);
+					}
+				}
+				add('custom:', '自定义 · 下方 OpenAI 兼容接口');
+				const current = currentSelectionKey(settings);
+				// 旧配置的自定义音色保留为可选项，避免下拉显示空白
+				if (!seen.has(current)) {
+					add(current, this.describeTtsSelection(settings, systemVoices));
+				}
+				drop.setValue(current).onChange(async (value) => {
+					const sep = value.indexOf(':');
+					const provider = value.slice(0, sep);
+					const voiceId = value.slice(sep + 1);
+					if (provider === 'system') {
+						applyVoiceSelection(settings, 'system', voiceId);
+					} else if (provider === 'custom') {
+						settings.ttsEngine = 'online';
+						settings.ttsOnlineProvider = 'custom';
+						if (!settings.ttsOnlineModel.trim()) settings.ttsOnlineModel = TTS_PROVIDERS.custom.model;
+						if (!settings.ttsOnlineVoice.trim()) settings.ttsOnlineVoice = 'alloy';
+					} else if (isCloudProvider(provider)) {
+						applyVoiceSelection(settings, provider, voiceId);
 					}
 					await this.plugin.saveSettings();
 					this.display();
 				});
 			});
 
-		if (ONLINE_TTS_PRESETS[this.plugin.settings.ttsOnlineProvider]?.hint) {
+		if (!systemTtsOk && settings.ttsEngine === 'system') {
 			containerEl.createEl('p', {
-				text: ONLINE_TTS_PRESETS[this.plugin.settings.ttsOnlineProvider].hint ?? '',
-				cls: 'setting-item-description',
+				text: '提示：本平台无法使用系统声音，实际朗读会自动改用云端声音（需下方配置）。',
+				cls: 'setting-item-description mod-warning',
 			});
 		}
 
-		new Setting(containerEl)
-			.setName('在线语音密钥')
-			.setDesc('与 AI 密钥同一存储位置（系统钥匙串 / data.json），各设备需分别填写')
-			.addText((text) => {
-				text
-					.setPlaceholder('sk-…')
-					.setValue(this.plugin.settings.ttsOnlineApiKey)
-					.onChange(async (v) => {
-						this.plugin.settings.ttsOnlineApiKey = v.trim();
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.type = 'password';
-				text.inputEl.autocomplete = 'off';
-			});
+		// ── 在线语音服务：每家一张可展开卡，接口与模型预填官方默认值 ──
+		// 密钥按提供商独立保存；接口/模型也可每家单独覆盖，互不串号。
+		new Setting(containerEl).setName('在线语音服务').setHeading();
+		containerEl.createEl('p', {
+			text: '内置服务已按官方文档预填接口与模型，通常只需填写密钥。密钥与 AI 密钥同一存储位置（系统钥匙串 / data.json），各设备需分别填写。',
+			cls: 'setting-item-description',
+		});
 
-		// 预置提供商才有可选项；自定义提供商直接填 id
-		const presetVoices = ONLINE_TTS_PRESETS[this.plugin.settings.ttsOnlineProvider]?.voices ?? [];
-		if (presetVoices.length) {
-			new Setting(containerEl)
-				.setName('在线语音音色')
-				.setDesc('也可在播放器面板里随时切换')
+		const keyFields: Record<
+			'openai' | 'siliconflow' | 'doubao' | 'qwen',
+			'ttsOpenaiApiKey' | 'ttsSiliconflowApiKey' | 'ttsDoubaoApiKey' | 'ttsQwenApiKey'
+		> = {
+			openai: 'ttsOpenaiApiKey',
+			siliconflow: 'ttsSiliconflowApiKey',
+			doubao: 'ttsDoubaoApiKey',
+			qwen: 'ttsQwenApiKey',
+		};
+
+		const doubaoKeyHint = (channel: string): string =>
+			channel === 'agentplan'
+				? '使用火山方舟 Agent Plan 控制台创建的套餐专属 API Key；语音技术控制台的 Key 与普通方舟推理 Key 都不通用。'
+				: '使用火山引擎「语音技术 → API Key 管理」里的 API Key；它只适用于标准通道，方舟推理 Key 不能填在这里。';
+
+		for (const provider of ['openai', 'siliconflow', 'doubao', 'qwen'] as const) {
+			const preset = TTS_PROVIDERS[provider];
+			const field = keyFields[provider];
+			const active = settings.ttsOnlineProvider === provider;
+			const card = containerEl.createEl('details', { cls: 'fleur-epub-provider-card' });
+			if (active) card.setAttr('open', '');
+			const summary = card.createEl('summary', { cls: 'fleur-epub-provider-summary' });
+			summary.createSpan({ cls: 'fleur-epub-provider-name', text: preset.label });
+			if (active) summary.createSpan({ cls: 'fleur-epub-provider-tag', text: '当前使用' });
+			const configured = Boolean(providerApiKey(settings, provider));
+			const state = summary.createSpan({
+				cls: `fleur-epub-provider-state${configured ? ' is-ready' : ''}`,
+				text: configured ? '已配置' : '未配置',
+			});
+			const body = card.createDiv('fleur-epub-provider-body');
+			const config = providerConfig(settings, provider);
+			let keyDescEl: HTMLElement | null = null;
+
+			// 豆包有两条同协议但不同端点/密钥的通道，必须让用户明确选，避免把
+			// AgentPlan 套餐 Key 打到标准语音端点（或反过来）后得到 401。
+			if (provider === 'doubao') {
+				const channel = config.channel ?? 'standard';
+				new Setting(body)
+					.setName('接入方式')
+					.setDesc(
+						'标准通道拼 /api/v3/tts/unidirectional；AgentPlan 通道拼 /api/v3/plan/tts/unidirectional。两边的密钥不通用。',
+					)
+					.addDropdown((drop) => {
+						drop
+							.addOption('standard', '豆包语音合成（标准）')
+							.addOption('agentplan', '火山方舟 Agent Plan')
+							.setValue(channel)
+							.onChange(async (v) => {
+								setProviderConfig(settings, provider, {
+									channel: v === 'agentplan' ? 'agentplan' : 'standard',
+								});
+								await this.plugin.saveSettings();
+								keyDescEl?.setText(doubaoKeyHint(v));
+							});
+					});
+			}
+
+			// 旧版单一密钥曾用于 OpenAI 兼容系：首次展示时带入，编辑后写入新字段
+			const currentKey =
+				settings[field] || (provider === 'openai' ? settings.ttsOnlineApiKey : '');
+			const apiKeySetting = new Setting(body)
+				.setName('API Key')
+				.setDesc(
+					provider === 'doubao'
+						? doubaoKeyHint(config.channel ?? 'standard')
+						: (preset.hint ?? ''),
+				)
+				.addText((text) => {
+					text
+						.setPlaceholder(preset.keyPlaceholder ?? 'sk-…')
+						.setValue(currentKey)
+						.onChange(async (v) => {
+							settings[field] = v.trim();
+							await this.plugin.saveSettings();
+							const ready = Boolean(v.trim());
+							state.setText(ready ? '已配置' : '未配置');
+							state.toggleClass('is-ready', ready);
+						});
+					text.inputEl.type = 'password';
+					text.inputEl.autocomplete = 'off';
+					text.inputEl.spellcheck = false;
+				});
+			keyDescEl = apiKeySetting.descEl;
+
+			const endpointHint =
+				provider === 'doubao'
+					? '标准通道自动拼 /api/v3/tts/unidirectional，AgentPlan 通道自动拼 /api/v3/plan/tts/unidirectional'
+					: provider === 'qwen'
+						? '请求自动拼到 /api/v1/services/aigc/multimodal-generation/generation'
+						: '请求自动拼到 /audio/speech';
+			new Setting(body)
+				.setName('接口地址')
+				.setDesc(`默认 ${preset.baseUrl}，${endpointHint}；使用自建代理时可改。`)
+				.addText((text) =>
+					text
+						.setPlaceholder(preset.baseUrl)
+						.setValue(config.baseUrl)
+						.onChange(async (v) => {
+							setProviderConfig(settings, provider, {
+								baseUrl: v.trim().replace(/\/+$/, ''),
+							});
+							await this.plugin.saveSettings();
+						}),
+				);
+
+			// 模型改为下拉：预设值来自官方文档，不再让用户凭记忆手填
+			new Setting(body)
+				.setName('模型')
+				.setDesc(
+					provider === 'doubao'
+						? '豆包语音合成 2.0 的资源 ID，决定计费与可用音色。'
+						: '服务商当前可用的语音模型。',
+				)
 				.addDropdown((drop) => {
-					for (const v of presetVoices) drop.addOption(v.id, v.label);
-					if (!presetVoices.some((v) => v.id === this.plugin.settings.ttsOnlineVoice)) {
-						drop.addOption(this.plugin.settings.ttsOnlineVoice, this.plugin.settings.ttsOnlineVoice);
+					const ids = new Set<string>();
+					for (const m of preset.models) {
+						drop.addOption(m.id, m.label);
+						ids.add(m.id);
 					}
-					drop.setValue(this.plugin.settings.ttsOnlineVoice).onChange(async (v) => {
-						this.plugin.settings.ttsOnlineVoice = v;
+					// 旧配置或手填值不在预设里时也要能回显
+					if (config.model && !ids.has(config.model)) {
+						drop.addOption(config.model, config.model);
+					}
+					drop.setValue(config.model).onChange(async (v) => {
+						setProviderConfig(settings, provider, { model: v });
 						await this.plugin.saveSettings();
 					});
 				});
-		} else {
-			new Setting(containerEl)
-				.setName('在线语音音色 id')
-				.setDesc('由服务商文档给出（例如音色名或 voice id）')
+		}
+
+		// 自定义服务：任意 OpenAI 兼容 /audio/speech，接口与模型由用户给出
+		{
+			const active = settings.ttsOnlineProvider === 'custom';
+			const configured = Boolean(providerApiKey(settings, 'custom'));
+			const card = containerEl.createEl('details', { cls: 'fleur-epub-provider-card' });
+			if (active) card.setAttr('open', '');
+			const summary = card.createEl('summary', { cls: 'fleur-epub-provider-summary' });
+			summary.createSpan({ cls: 'fleur-epub-provider-name', text: '自定义 · OpenAI 兼容' });
+			if (active) summary.createSpan({ cls: 'fleur-epub-provider-tag', text: '当前使用' });
+			const state = summary.createSpan({
+				cls: `fleur-epub-provider-state${configured ? ' is-ready' : ''}`,
+				text: configured ? '已配置' : '未配置',
+			});
+			summary.createSpan({
+				cls: 'fleur-epub-provider-hint',
+				text: '仅 OpenAI 兼容 /audio/speech；方舟 AgentPlan 请用「豆包」卡',
+			});
+			const body = card.createDiv('fleur-epub-provider-body');
+			const customConfig = providerConfig(settings, 'custom');
+
+			new Setting(body)
+				.setName('API Key')
+				.setDesc('仅自定义接口使用；不借用其他提供商的密钥')
+				.addText((text) => {
+					text
+						.setPlaceholder('sk-…')
+						.setValue(settings.ttsCustomApiKey)
+						.onChange(async (v) => {
+							settings.ttsCustomApiKey = v.trim();
+							await this.plugin.saveSettings();
+							const ready = Boolean(v.trim());
+							state.setText(ready ? '已配置' : '未配置');
+							state.toggleClass('is-ready', ready);
+						});
+					text.inputEl.type = 'password';
+					text.inputEl.autocomplete = 'off';
+				});
+
+			new Setting(body)
+				.setName('接口地址')
+				.setDesc('Base URL，末尾不带斜杠')
 				.addText((text) =>
 					text
-						.setPlaceholder('voice-id')
-						.setValue(this.plugin.settings.ttsOnlineVoice)
+						.setPlaceholder('https://example.com/v1')
+						.setValue(customConfig.baseUrl)
 						.onChange(async (v) => {
-							this.plugin.settings.ttsOnlineVoice = v.trim();
+							settings.ttsOnlineBaseUrl = v.trim().replace(/\/+$/, '');
+							await this.plugin.saveSettings();
+						}),
+				);
+
+			new Setting(body)
+				.setName('模型')
+				.setDesc('由服务商文档给出，例如 tts-1')
+				.addText((text) =>
+					text
+						.setPlaceholder('tts-1')
+						.setValue(customConfig.model)
+						.onChange(async (v) => {
+							settings.ttsOnlineModel = v.trim();
+							await this.plugin.saveSettings();
+						}),
+				);
+
+			new Setting(body)
+				.setName('音色 id')
+				.setDesc('由服务商文档给出，例如 alloy 或自定义音色名')
+				.addText((text) =>
+					text
+						.setPlaceholder('alloy')
+						.setValue(settings.ttsOnlineVoice)
+						.onChange(async (v) => {
+							settings.ttsOnlineVoice = v.trim();
 							await this.plugin.saveSettings();
 						}),
 				);
 		}
 
-		new Setting(containerEl)
-			.setName('在线语音接口地址')
-			.setDesc('OpenAI 兼容 Base URL（末尾不带斜杠），切换提供商时自动填入')
-			.addText((text) =>
-				text
-					.setPlaceholder('https://api.siliconflow.cn/v1')
-					.setValue(this.plugin.settings.ttsOnlineBaseUrl)
-					.onChange(async (v) => {
-						this.plugin.settings.ttsOnlineBaseUrl = v.trim().replace(/\/+$/, '');
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName('在线语音模型')
-			.setDesc('如 tts-1、FunAudioLLM/CosyVoice2-0.5B')
-			.addText((text) =>
-				text
-					.setPlaceholder('tts-1')
-					.setValue(this.plugin.settings.ttsOnlineModel)
-					.onChange(async (v) => {
-						this.plugin.settings.ttsOnlineModel = v.trim();
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		// 试听：直接合成一句话，验证地址 / 密钥 / 模型 / 音色是否都对
+		// 试听：系统声音直接念；云端合成一句话，验证地址 / 密钥 / 模型 / 音色是否都对
 		const ttsTest = new Setting(containerEl);
-		ttsTest.setName('试听在线语音');
-		ttsTest.setDesc('合成并播放一句话，用于确认配置可用');
+		ttsTest.setName('试听当前声音');
+		ttsTest.setDesc(`${this.describeTtsSelection(settings, systemVoices)} · 合成并播放一句话`);
 		ttsTest.addButton((btn) => {
 			btn.setButtonText('试听').setCta().onClick(async () => {
 				btn.setDisabled(true);
 				btn.setButtonText('合成中…');
 				try {
-					const { synthesizeOnline: synth } = await import('./tts-online');
-					const blob = await synth(
-						{
-							baseUrl: this.plugin.settings.ttsOnlineBaseUrl,
-							apiKey: this.plugin.settings.ttsOnlineApiKey,
-							model: this.plugin.settings.ttsOnlineModel,
-							voice: this.plugin.settings.ttsOnlineVoice,
-						},
-						'这是一段试听语音，配置正常。',
-					);
-					const url = URL.createObjectURL(blob);
-					const audio = new Audio(url);
-					audio.onended = () => URL.revokeObjectURL(url);
-					await audio.play();
+					if (settings.ttsEngine === 'system') {
+						if (!systemTtsOk) throw new Error('当前平台不支持系统声音');
+						const u = new SpeechSynthesisUtterance('这是一段试听语音，配置正常。');
+						const voice = systemVoices.find((v) => v.voiceURI === settings.ttsVoiceURI);
+						if (voice) {
+							u.voice = voice;
+							u.lang = voice.lang;
+						}
+						window.speechSynthesis.speak(u);
+					} else {
+						const provider = settings.ttsOnlineProvider;
+						const config = providerConfig(settings, provider);
+						const blob = await synthesizeOnline(
+							{
+								provider,
+								baseUrl: config.baseUrl,
+								apiKey: providerApiKey(settings, provider),
+								model: config.model,
+								channel: config.channel,
+								voice: settings.ttsOnlineVoice,
+								lang: navigator.language,
+							},
+							'这是一段试听语音，配置正常。',
+						);
+						const url = URL.createObjectURL(blob);
+						const audio = new Audio(url);
+						audio.onended = () => URL.revokeObjectURL(url);
+						await audio.play();
+					}
 					btn.setButtonText('✓ 播放中');
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
@@ -961,6 +1168,42 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 				scroller.scrollTop = savedTop;
 			});
 		}
+	}
+
+	/** 系统声源：只取中英文，同名变体去重，最多 16 个（下拉不宜过长） */
+	private systemVoices(): SpeechSynthesisVoice[] {
+		try {
+			const all = window.speechSynthesis?.getVoices?.() ?? [];
+			const seen = new Set<string>();
+			return all
+				.filter((v) => /^(zh|en)/i.test(v.lang))
+				.filter((v) => {
+					const key = v.name.replace(/\s*\([^)]*\)\s*/g, '').trim().toLowerCase();
+					if (seen.has(key)) return false;
+					seen.add(key);
+					return true;
+				})
+				.slice(0, 16);
+		} catch (_e) {
+			return [];
+		}
+	}
+
+	/** 当前声音的一句话描述（下拉兜底项与试听说明共用） */
+	private describeTtsSelection(
+		settings: FleurEpubSettings,
+		systemVoices: SpeechSynthesisVoice[],
+	): string {
+		if (settings.ttsEngine === 'system') {
+			const voice = systemVoices.find((v) => v.voiceURI === settings.ttsVoiceURI);
+			return voice ? `系统 · ${voice.name}` : '系统 · 自动';
+		}
+		const preset = providerPreset(settings.ttsOnlineProvider);
+		if (!preset) return '在线声音';
+		const voice = preset.voices.find((v) => v.id === settings.ttsOnlineVoice);
+		return voice
+			? `${preset.shortLabel} · ${voice.label}`
+			: `${preset.shortLabel} · ${settings.ttsOnlineVoice || '未选音色'}`;
 	}
 
 	/**

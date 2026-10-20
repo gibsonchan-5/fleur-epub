@@ -14,6 +14,16 @@ import type FleurEpubPlugin from './main';
 import type { EpubReaderView } from './reader-view';
 import { isMobileUI } from './platform';
 import { onlineTtsReady, synthesizeOnline } from './tts-online';
+import {
+	applyVoiceSelection,
+	currentSelectionKey,
+	isCloudProvider,
+	providerApiKey,
+	providerConfig,
+	providerPreset,
+} from './tts-providers';
+import type { TtsProviderId } from './tts-providers';
+import { normalizeTtsRate } from './tts-rate';
 
 export type TTSItem = { el: HTMLElement; text: string };
 
@@ -34,9 +44,6 @@ export type TTSState = {
 	/** 当前引擎（播放器展示 / 切换用） */
 	engine: TTSEngine;
 };
-
-/** 预设语速（微信读书式 0.75x–2.0x） */
-export const TTS_RATES = [0.75, 1, 1.25, 1.5, 2];
 
 export class ReaderTTS {
 	private view: EpubReaderView;
@@ -63,7 +70,7 @@ export class ReaderTTS {
 
 	constructor(view: EpubReaderView) {
 		this.view = view;
-		this.rate = view.plugin.settings.ttsRate ?? 1;
+		this.rate = normalizeTtsRate(view.plugin.settings.ttsRate ?? 1);
 		this.refreshVoices();
 		// 声源列表异步加载（Chrome/WebView 首次 getVoices 常返回空），到达后补一次广播
 		try {
@@ -250,7 +257,9 @@ export class ReaderTTS {
 		if (this.active) return;
 		if (!this.ready()) {
 			if (this.engine() === 'online') {
-				new Notice('听书需要在线语音：请在设置 → 听书里填入语音接口地址与密钥', 4200);
+				const provider = this.view.plugin.settings.ttsOnlineProvider;
+				const label = providerPreset(provider)?.label ?? '在线语音';
+				new Notice(`听书需要${label}：请在设置 → 听书里填入该服务的密钥`, 4200);
 			} else {
 				new Notice('当前环境不支持语音朗读', 2200);
 			}
@@ -360,13 +369,14 @@ export class ReaderTTS {
 
 	/** 设置语速：持久化；朗读中即时生效 */
 	setRate(rate: number): void {
-		if (!TTS_RATES.includes(rate) || rate === this.rate) return;
-		this.rate = rate;
-		this.view.plugin.settings.ttsRate = rate;
+		const next = normalizeTtsRate(rate, this.rate);
+		if (next === this.rate) return;
+		this.rate = next;
+		this.view.plugin.settings.ttsRate = next;
 		void this.view.plugin.saveSettings();
 		if (this.engine() === 'online') {
 			// 在线：音频原生变速，不重新合成（省流量、无延迟）
-			if (this.audio) this.audio.playbackRate = rate;
+			if (this.audio) this.audio.playbackRate = next;
 			this.emit();
 			return;
 		}
@@ -376,17 +386,40 @@ export class ReaderTTS {
 
 	/** 在线引擎：选择音色（持久化；朗读中从当前句以新音色重读） */
 	setOnlineVoice(voice: string): void {
-		if (!voice || voice === this.view.plugin.settings.ttsOnlineVoice) return;
-		this.view.plugin.settings.ttsOnlineVoice = voice;
-		void this.view.plugin.saveSettings();
-		this.clearPrefetch();
-		if (this.active && !this.paused) this.speakCurrent();
-		else this.emit();
+		const provider = this.view.plugin.settings.ttsOnlineProvider;
+		if (!isCloudProvider(provider)) return;
+		this.selectVoice(provider, voice);
 	}
 
 	/** 在线引擎：当前音色 id */
 	getOnlineVoice(): string {
 		return this.view.plugin.settings.ttsOnlineVoice;
+	}
+
+	/**
+	 * 统一声音选择（系统 / 云端共用）：写回引擎、提供商、地址、模型与音色。
+	 * 朗读中切换时保留当前句与进度，用新声音从本句重读；暂停中切换则保持暂停。
+	 */
+	selectVoice(provider: TtsProviderId, voiceId: string): void {
+		const settings = this.view.plugin.settings;
+		const before = currentSelectionKey(settings);
+		applyVoiceSelection(settings, provider, voiceId);
+		const after = currentSelectionKey(settings);
+		void this.view.plugin.saveSettings();
+		if (before === after) {
+			this.emit();
+			return;
+		}
+		this.clearPrefetch();
+		this.releaseAudio();
+		if (this.active) {
+			this.gen++;
+			this.cancelSpeech();
+			if (this.paused) this.emit();
+			else this.speakCurrent();
+		} else {
+			this.emit();
+		}
 	}
 
 	// ── 内部 ──
@@ -495,12 +528,18 @@ export class ReaderTTS {
 		const item = this.items[i];
 		if (!item) throw new Error('句子已失效');
 		const s = this.view.plugin.settings;
+		const provider = s.ttsOnlineProvider;
+		const config = providerConfig(s, provider);
 		const blob = await synthesizeOnline(
 			{
-				baseUrl: s.ttsOnlineBaseUrl,
-				apiKey: s.ttsOnlineApiKey,
-				model: s.ttsOnlineModel,
+				provider,
+				baseUrl: config.baseUrl,
+				apiKey: providerApiKey(s, provider),
+				model: config.model,
+				channel: config.channel,
 				voice: s.ttsOnlineVoice,
+				// 语速由音频元素的 playbackRate 统一接管；合成时再传 speed
+				// 会变成「合成加速 × 播放加速」的双倍速，且预取缓存会旧档。
 				lang: this.lang,
 			},
 			item.text,

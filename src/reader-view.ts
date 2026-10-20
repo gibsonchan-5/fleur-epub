@@ -15,6 +15,7 @@ import { cleanAnnotationText } from './text-utils';
 import { TranslationEngine, findParagraphEl, collectParagraphs } from './translator';
 import type { ReaderTheme } from './settings';
 import { isMobileUI } from './platform';
+import { BAR_HIDE_DELAY, isReaderFocusActive, shouldHideBarAfterLeave, toggleReaderFocus } from './focus';
 import { outerGapAttrs } from './outer-gap';
 import { spacingCss, LETTER_SPACING_DEFAULT, LETTER_SPACING_MAX, WORD_SPACING_DEFAULT, WORD_SPACING_MIN, WORD_SPACING_MAX } from './spacing';
 import { MobileChrome } from './mobile-chrome';
@@ -287,6 +288,10 @@ export class EpubReaderView extends FileView {
 	private immersive = false;
 	private fsBtn: HTMLElement | null = null;
 	private leafChangeRef: EventRef | null = null;
+	// ── 桌面全屏：顶栏自动隐藏（悬停顶部唤出）──
+	private barEl: HTMLElement | null = null;
+	private barShown = false;
+	private barHideTimer: number | null = null;
 	/** 桌面端听书播放器 Modal（关闭仅收起面板，朗读继续） */
 	private ttsModal: TTSPlayerModal | null = null;
 
@@ -310,6 +315,9 @@ export class EpubReaderView extends FileView {
 
 		// 顶栏：书名 · 居中；右侧：模式切换 + 进度
 		const bar = createDiv('fleur-epub-bar');
+		// 桌面全屏：左侧红绿灯区留一条真实拖窗条。drag 区域会吞掉指针事件，
+		// 不能把整条顶栏设为 drag（自动隐藏需要 hover/leave 事件），故单独成元素。
+		if (!isMobileUI(this.plugin)) bar.appendChild(createDiv('fleur-epub-bar-drag'));
 		// 移动端：顶栏左侧「返回书架」（微信读书式 chevron）；桌面不渲染
 		if (isMobileUI(this.plugin)) {
 			const backBtn = createSpan('fleur-epub-bar-btn fleur-epub-bar-back');
@@ -408,29 +416,23 @@ export class EpubReaderView extends FileView {
 		right.appendChild(wwBtn);
 		if (this.ttsBtn) right.appendChild(this.ttsBtn);
 
-		// 沉浸全屏（仅移动端）：隐藏 Obsidian 移动端顶部导航，阅读区铺满整屏
-		if (isMobileUI(this.plugin)) {
-			const fsBtn = createSpan('fleur-epub-bar-btn fleur-epub-bar-btn-fs');
-			setIcon(fsBtn.createSpan('fleur-epub-bar-btn-icon'), 'maximize');
-			fsBtn.setAttribute('aria-label', '沉浸全屏');
-			fsBtn.addEventListener('click', (e) => {
-				e.stopPropagation();
-				this.setImmersive(!this.immersive);
-			});
-			this.fsBtn = fsBtn;
-			right.appendChild(fsBtn);
-		}
+		// 全屏：移动端走 fixed 沉浸，桌面端隐藏宿主 chrome（见 focus.ts）
+		if (isMobileUI(this.plugin)) right.appendChild(this.createFullscreenButton());
 
 		right.appendChild(seg);
 		// 进度环紧靠模式切换右侧并置（微信读书式：一个环看全书进度），
 		// 滚动 / 翻页两种模式都常驻可见；间距由 CSS 收紧，视觉上成一组。
 		right.appendChild(this.buildProgressRing());
+		if (!isMobileUI(this.plugin)) right.appendChild(this.createFullscreenButton());
 		bar.appendChild(this.titleEl);
 		bar.appendChild(right);
 
 		this.readerEl = createDiv('fleur-epub-reader');
+		this.barEl = bar;
 		this.contentEl.appendChild(bar);
 		this.contentEl.appendChild(this.readerEl);
+		// 桌面全屏：顶栏默认隐藏，指针移到窗口顶部才出现（移动端走沉浸 chrome）
+		if (!isMobileUI(this.plugin)) this.setupFocusBarAutoHide();
 
 		// 宿主侧键盘翻页（焦点在宿主时生效；iframe 内的由 bindDocEvents 覆盖）
 		this.contentEl.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -483,12 +485,15 @@ export class EpubReaderView extends FileView {
 			// 软键盘自适应：宿主（Obsidian）弹出键盘时会为输入预留一块等高空白，
 			// 阅读区被压成一条、下方露出宿主白底（表现为「批注窗口出现后背景变白」）。
 			this.setupMobileViewportSync();
-			// 沉浸全屏自动退出：切到其它视图/面板时撤掉全局隐藏类，避免影响其它界面
-			this.leafChangeRef = this.app.workspace.on('active-leaf-change', () => {
-				if (!this.immersive) return;
-				if (this.app.workspace.getActiveViewOfType(EpubReaderView) !== this) this.setImmersive(false);
-			});
 		}
+
+		// 全屏自动退出（移动端沉浸 / 桌面专注共用）：切到其它视图时恢复宿主 chrome，
+		// 避免标签栏、侧栏、状态栏被一直藏住。
+		this.leafChangeRef = this.app.workspace.on('active-leaf-change', () => {
+			if (this.app.workspace.getActiveViewOfType(EpubReaderView) === this) return;
+			if (this.immersive) this.setImmersive(false);
+			this.setReaderFocus(false);
+		});
 	}
 
 	/**
@@ -585,7 +590,7 @@ export class EpubReaderView extends FileView {
 	setImmersive(on: boolean): void {
 		this.immersive = on;
 		document.body.toggleClass('fleur-epub-immersive', on);
-		this.fsBtn?.toggleClass('is-active', on);
+		this.renderFullscreenState(on);
 		if (on) {
 			// 进入沉浸：清掉可见带同步写入的内联高度。隐藏导航是纯 CSS 操作，
 			// 不会触发 vv/resize，残留的内联 height（按非沉浸时的可见带计算，
@@ -598,6 +603,111 @@ export class EpubReaderView extends FileView {
 			// 退出沉浸：立即重算可见带高度（回到普通布局，根元素重新撑满可用区；
 			// 高度变化同样触发分页器重排）
 			this.syncReaderViewport();
+		}
+	}
+
+	/** 顶栏全屏按钮：移动端与桌面共用，图标在 maximize / minimize 间切换 */
+	private createFullscreenButton(): HTMLElement {
+		const btn = createSpan('fleur-epub-bar-btn fleur-epub-bar-btn-fs');
+		setIcon(btn.createSpan('fleur-epub-bar-btn-icon'), 'maximize');
+		this.fsBtn = btn;
+		this.renderFullscreenState(
+			isMobileUI(this.plugin) ? this.immersive : isReaderFocusActive(this.contentEl.ownerDocument),
+		);
+		btn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			if (isMobileUI(this.plugin)) {
+				this.setImmersive(!this.immersive);
+			} else {
+				this.setReaderFocus(!isReaderFocusActive(this.contentEl.ownerDocument));
+			}
+		});
+		return btn;
+	}
+
+	/** 刷新全屏按钮的图标 / 高亮 / 提示 */
+	private renderFullscreenState(active: boolean): void {
+		this.fsBtn?.toggleClass('is-active', active);
+		this.fsBtn?.setAttribute('aria-label', active ? '退出全屏' : '全屏');
+		const icon = this.fsBtn?.querySelector('.fleur-epub-bar-btn-icon');
+		if (icon instanceof HTMLElement) setIcon(icon, active ? 'minimize' : 'maximize');
+	}
+
+	/**
+	 * 桌面全屏下的顶栏自动隐藏：默认收起，指针移到窗口顶部唤醒。
+	 *
+	 * 唤醒带必须是独立元素：正文在 foliate 的 iframe 里，指针事件不会冒泡到宿主，
+	 * 只靠根元素监听会在阅读区上失效。顶栏在唤醒带之上（z-index 更高），
+	 * 显示后由顶栏自己接管 hover，离开顶栏（且不在顶部带内）再延迟收起。
+	 */
+	private setupFocusBarAutoHide(): void {
+		const bar = this.barEl;
+		if (!bar) return;
+		const zone = createDiv('fleur-epub-edge-reveal');
+		this.contentEl.appendChild(zone);
+		this.registerDomEvent(zone, 'mouseenter', () => this.revealFocusBar());
+		this.registerDomEvent(zone, 'mousemove', () => this.revealFocusBar());
+		this.registerDomEvent(bar, 'mouseenter', () => {
+			if (this.barShown) this.cancelBarHide();
+		});
+		this.registerDomEvent(bar, 'mouseleave', (e: MouseEvent) => {
+			if (!this.barShown) return;
+			if (!isReaderFocusActive(this.contentEl.ownerDocument)) return;
+			// 指针仍在顶部唤醒带内 → 收起后会立刻被同一指针唤醒，保持显示
+			if (!shouldHideBarAfterLeave(e.clientY)) return;
+			this.scheduleFocusBarHide();
+		});
+	}
+
+	private revealFocusBar(): void {
+		if (!isReaderFocusActive(this.contentEl.ownerDocument)) return;
+		this.setFocusBarShown(true);
+	}
+
+	private setFocusBarShown(shown: boolean): void {
+		this.barShown = shown;
+		this.contentEl.toggleClass('is-bar-shown', shown);
+		if (shown) this.cancelBarHide();
+	}
+
+	private scheduleFocusBarHide(): void {
+		this.cancelBarHide();
+		this.barHideTimer = window.setTimeout(() => {
+			this.barHideTimer = null;
+			if (!isReaderFocusActive(this.contentEl.ownerDocument)) return;
+			// 延迟期间指针又回到顶栏 → 不收起
+			if (this.barEl?.matches(':hover')) return;
+			this.setFocusBarShown(false);
+		}, BAR_HIDE_DELAY);
+	}
+
+	/** 正文内指针移动＝已离开顶栏；iframe 事件不冒泡，需在章节文档里单独接住 */
+	private noteReaderPointerMoved(): void {
+		if (!this.barShown) return;
+		if (!isReaderFocusActive(this.contentEl.ownerDocument)) return;
+		this.scheduleFocusBarHide();
+	}
+
+	private cancelBarHide(): void {
+		if (this.barHideTimer === null) return;
+		window.clearTimeout(this.barHideTimer);
+		this.barHideTimer = null;
+	}
+
+	/** 桌面全屏：按目标状态进入 / 退出，幂等 */
+	private setReaderFocus(on: boolean): void {
+		const doc = this.contentEl.ownerDocument;
+		if (isReaderFocusActive(doc) === on) {
+			this.renderFullscreenState(on);
+			if (!on) this.setFocusBarShown(false);
+			return;
+		}
+		this.renderFullscreenState(toggleReaderFocus(doc, this.app.workspace));
+		if (on) {
+			// 从顶栏按钮进入时指针正压在顶栏上，保持可见；其余入口直接收起
+			this.setFocusBarShown(this.barEl?.matches(':hover') === true);
+		} else {
+			this.setFocusBarShown(false);
 		}
 	}
 
@@ -1589,6 +1699,9 @@ export class EpubReaderView extends FileView {
 
 	/** 给章节文档绑定 iframe 内交互：点按翻页 + 滚轮翻页 + 键盘翻页 */
 	private bindDocEvents(doc: Document): void {
+		// 桌面全屏自动隐藏顶栏：正文在 iframe 内，指针事件不冒泡到宿主，
+		// 进入正文即说明离开了顶栏（只在顶栏当前可见时才启动收起计时）。
+		doc.addEventListener('mousemove', () => this.noteReaderPointerMoved(), { passive: true });
 		// 点击书内区域 → 收起外观面板（iframe 内的点击不会冒泡到主文档，
 		// 主文档上的外点关闭监听收不到，必须在这里补一层）
 		doc.addEventListener('mousedown', () => {
@@ -3586,6 +3699,8 @@ export class EpubReaderView extends FileView {
 
 	async onClose(): Promise<void> {
 		this.setImmersive(false);
+		this.setReaderFocus(false);
+		this.cancelBarHide();
 		this.vvCleanup?.();
 		this.vvCleanup = null;
 		if (this.leafChangeRef) {
