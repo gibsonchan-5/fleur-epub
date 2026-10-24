@@ -288,3 +288,42 @@ test('配置目录里的设备标识被污染（含目录穿越字符）时，�
 	assert.ok(shards[0].startsWith(`${DATA_DIR}/ann/book9/`), `分片越界：${shards[0]}`);
 	assert.ok(!shards[0].includes('..'));
 });
+
+// ── 批注文字（comment）的合并语义：正文编辑器只改 comment 时曾漏刷 updatedAt，
+//    分片回读会按「同时间戳 → canonical 字典序」把带 comment 的那份顶掉（表现为
+//    写完批注只剩高亮、点开只有「清除高亮」、侧边栏看不到批注内容）。
+test('只改 comment、未刷 updatedAt：保存后批注文字不被分片旧副本顶掉', async () => {
+	const { adapter } = makeAdapter();
+	const fp = 'book7';
+	const a = await newDevice(adapter, 'deviceA');
+	const item = ann('c1', Date.now());
+	await a.save(book(fp, [item]));
+
+	// 模拟正文编辑器的保存：只写 comment（updatedAt 仍是创建时间）
+	item.comment = '我的想法';
+	await a.save(book(fp, [item]));
+
+	// 另一台设备同步后加载，批注文字必须还在
+	const b = await newDevice(adapter, 'deviceB');
+	const loaded = await b.load(fp);
+	assert.ok(loaded);
+	assert.equal(loaded.annotations.find((x) => x.id === 'c1')?.comment, '我的想法');
+});
+
+test('同一时间戳下显式清除批注：不会被旧副本里的 comment 复活', async () => {
+	const { adapter } = makeAdapter();
+	const fp = 'book8';
+	const now = Date.now();
+	const a = await newDevice(adapter, 'deviceA');
+	const item = ann('c2', now, { comment: '旧想法' });
+	await a.save(book(fp, [item]));
+
+	item.comment = undefined;
+	item.updatedAt = now + 1000; // updateAnnotationComment 会推进时间
+	await a.save(book(fp, [item]));
+
+	const b = await newDevice(adapter, 'deviceB');
+	const loaded = await b.load(fp);
+	assert.ok(loaded);
+	assert.equal(loaded.annotations.find((x) => x.id === 'c2')?.comment, undefined);
+});

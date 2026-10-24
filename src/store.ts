@@ -297,6 +297,15 @@ export function mergeAnnotations(
 			byId.set(k, da ? { ...a } : { ...prev });
 			return;
 		}
+		// 同时间戳下「有批注文字」的信息量更大：旧调用方漏刷 updatedAt 时，
+		// 按字典序比较可能恰好选中没有 comment 的副本（大写 C 之前的小写字段），
+		// 让用户刚写的批注凭空消失。删除已由上面分支优先，这里只兜住「一侧有、一侧无」。
+		const ca = typeof a.comment === 'string' && a.comment.trim() !== '';
+		const cp = typeof prev.comment === 'string' && prev.comment.trim() !== '';
+		if (ca !== cp) {
+			byId.set(k, ca ? { ...a } : { ...prev });
+			return;
+		}
 		if (canonicalJson(a) > canonicalJson(prev)) byId.set(k, { ...a });
 	};
 	// 顺序无关：所有分支都由时间戳/内容决定，不依赖谁先放进 Map

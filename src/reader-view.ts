@@ -3080,10 +3080,12 @@ export class EpubReaderView extends FileView {
 		ta.value = ann.comment ?? '';
 
 		const doSave = () => {
-			ann.comment = ta.value.trim() || undefined;
-			this.saveBookData();
-			// 广播变更（侧边栏即时刷新）
-			this.plugin.notifyAnnotationsChanged();
+			// 统一走 updateAnnotationComment：它会刷新 updatedAt。只改 comment 不刷时间，
+			// 分片/主文件回读合并时会按旧时间戳判负，刚写的批注文字会当场消失
+			//（只剩高亮，点开只有「清除高亮」，侧边栏也是空批注）。
+			const next = ta.value.trim() || undefined;
+			ann.comment = next;
+			void this.updateAnnotationComment(ann.id, next);
 			// 保存后弹窗关闭、批注就在正文里，不再弹「批注已保存」提示
 			this.hideAnnPopup();
 		};
