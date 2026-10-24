@@ -46,11 +46,13 @@ Obsidian 的 EPUB 阅读插件，基于 foliate-js 渲染，延续 FleurPDF 的�
 ### 5. Read aloud, on desktop and mobile · 桌面与移动端听书
 
 - Sentence-by-sentence playback with the current sentence highlighted, progress scrubbing and a 0.5x–2.5x speed slider
-- **System and cloud voices in one picker** — free offline system voices, or cloud voices from OpenAI, SiliconFlow, Doubao (Volcengine standard / AgentPlan) and Qwen
+- **System and cloud voices in one picker** — free offline system voices, or cloud voices from OpenAI, SiliconFlow, Doubao (Volcengine standard / AgentPlan), Qwen and Tencent Cloud TextToVoice
 - Desktop opens a centered player; mobile opens a touch-sized bottom sheet. Closing the player keeps reading aloud
 - Android WebView has no system speech engine, so the plugin automatically falls back to a configured cloud voice
 
-逐句朗读并高亮当前句，可拖动进度、0.5x–2.5x 调速；系统声音免费离线，云端声音支持 OpenAI、硅基流动、豆包（火山引擎标准 / AgentPlan）与千问；桌面端为居中播放器，移动端为底部面板，关闭后朗读继续；安卓 WebView 无系统语音时自动回落到在线声音。
+逐句朗读并高亮当前句，可拖动进度、0.5x–2.5x 调速；系统声音免费离线，云端声音支持 OpenAI、硅基流动、豆包（火山引擎标准 / AgentPlan）、千问与腾讯云 TextToVoice；桌面端为居中播放器，移动端为底部面板，关闭后朗读继续；安卓 WebView 无系统语音时自动回落到在线声音。
+
+腾讯云使用双密钥：SecretId 随请求头发出，SecretKey 只在本机参与 TC3 签名、从不发出。单次上限 150 汉字，插件会自动切块并把 PCM 拼成 WAV。音色目录只收精品与大模型两档，不含超自然音色。
 
 > **Privacy note · 隐私说明** — FleurEPUB has no telemetry and no analytics. Network access happens only when you use a feature that needs it:
 >

@@ -1201,6 +1201,17 @@ export class EpubReaderView extends FileView {
 		return this.tts;
 	}
 
+	/**
+	 * 终止听书后退出播放器：桌面关 Modal、移动端收 bottom sheet。
+	 * 只由「终止」按钮调用；面板右上角 × 仍走各自的「仅收起、朗读继续」。
+	 */
+	dismissTTSPlayer(): void {
+		const modal = this.ttsModal;
+		this.ttsModal = null;
+		modal?.close();
+		this.chrome?.closeTTSPlayer();
+	}
+
 	/** TTS 素材：当前章节按块级元素切段（段落边界即自然停顿）+ 文档语言；无内容返回 null */
 	/** 当前章节语言（声源列表排序用，轻量不扫正文） */
 	getTTSChapterLang(): string {

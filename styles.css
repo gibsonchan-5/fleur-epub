@@ -2657,6 +2657,45 @@ body.fleur-epub-mobile .fleur-epub-sheet-export:active {
 .fleur-epub-tts-player .fleur-epub-tts-side:active {
 	background: var(--background-modifier-active-hover, var(--background-modifier-hover));
 }
+/* 终止：绝对定位在控制行右端，中间三键保持居中；空闲时隐藏（[hidden] 需压过 flex） */
+.fleur-epub-tts-player .fleur-epub-tts-stop {
+	position: absolute;
+	right: 2px;
+	top: 50%;
+	transform: translateY(-50%);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 34px;
+	height: 34px;
+	border-radius: 50%;
+	color: var(--text-muted);
+	cursor: pointer;
+	-webkit-tap-highlight-color: transparent;
+	transition: background 0.12s ease, color 0.12s ease;
+}
+.fleur-epub-tts-player .fleur-epub-tts-stop:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+.fleur-epub-tts-player .fleur-epub-tts-stop:active {
+	background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+.fleur-epub-tts-player .fleur-epub-tts-stop[hidden] {
+	display: none;
+}
+.fleur-epub-tts-player .fleur-epub-tts-stop-glyph {
+	width: 10px;
+	height: 10px;
+	border-radius: 2px;
+	background: currentColor;
+}
+/* 窄屏（<=360px，sheet 内宽约 288px）：收紧三键间距，终止钮不压到「下一句」的点击区 */
+@media (max-width: 360px) {
+	.fleur-epub-tts-player .fleur-epub-tts-controls {
+		gap: 28px;
+	}
+}
 .fleur-epub-tts-player .fleur-epub-tts-side-icon {
 	display: inline-flex;
 }

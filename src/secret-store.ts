@@ -25,6 +25,8 @@ export const SECRET_FIELDS = [
   'ttsSiliconflowApiKey',
   'ttsDoubaoApiKey',
   'ttsQwenApiKey',
+  'ttsTencentSecretId',
+  'ttsTencentSecretKey',
   'ttsCustomApiKey',
 ] as const;
 
@@ -44,6 +46,8 @@ export const SECRET_IDS: Record<SecretField, string> = {
   ttsSiliconflowApiKey: 'fleur-epub-tts-siliconflow-key',
   ttsDoubaoApiKey: 'fleur-epub-tts-doubao-key',
   ttsQwenApiKey: 'fleur-epub-tts-qwen-key',
+  ttsTencentSecretId: 'fleur-epub-tts-tencent-secret-id',
+  ttsTencentSecretKey: 'fleur-epub-tts-tencent-secret-key',
   ttsCustomApiKey: 'fleur-epub-tts-custom-key',
 };
 

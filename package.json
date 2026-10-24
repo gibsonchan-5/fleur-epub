@@ -1,12 +1,13 @@
 {
   "name": "fleur-epub",
-  "version": "0.2.47",
+  "version": "0.2.48",
   "description": "Read EPUB books with highlights, wavy underlines, comments, full-text search, AI annotations, paragraph translation and read-aloud — the FleurPDF experience for e-books.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
-    "typecheck": "tsc -noEmit"
+    "typecheck": "tsc -noEmit",
+    "test": "npx --yes tsx --tsconfig tsconfig.test.json --test test/*.test.ts"
   },
   "keywords": [],
   "author": "gibsonchan-5",

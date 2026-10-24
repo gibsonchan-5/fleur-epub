@@ -131,6 +131,11 @@ export class MobileChrome {
 		});
 	}
 
+	/** 终止听书：收起播放器 sheet（× 仍是仅收起，由终止按钮显式调用） */
+	closeTTSPlayer(): void {
+		this.closeSheet();
+	}
+
 	// ── bottom sheet ──
 
 	private openSheet(title: string, build: (body: HTMLElement) => void): void {

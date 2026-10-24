@@ -72,6 +72,18 @@ export function buildTTSPlayer(container: HTMLElement, view: EpubReaderView): ()
 	nextBtn.setAttribute('aria-label', '下一句');
 	nextBtn.addEventListener('click', () => tts.next());
 
+	// 终止：结束本次听书（清高亮、停跟读）并退出播放器。
+	// 与右上角 × 不同——× 只收起面板、朗读继续；终止是「不再听了」的显式出口。
+	// 绝对定位在控制行右端，中间三键保持居中；空闲（尚未开播/已结束）时隐藏。
+	const stopBtn = controls.createDiv('fleur-epub-tts-stop');
+	stopBtn.setAttribute('aria-label', '终止听书');
+	stopBtn.setAttribute('title', '终止听书');
+	stopBtn.createSpan('fleur-epub-tts-stop-glyph');
+	stopBtn.addEventListener('click', () => {
+		tts.stop();
+		view.dismissTTSPlayer();
+	});
+
 	// ── 语速：一条滑杆 + 实时数值，松手才应用 ──
 	const rateRow = container.createDiv('fleur-epub-tts-rate-row');
 	rateRow.createSpan('fleur-epub-tts-rate-label').setText('语速');
@@ -345,6 +357,7 @@ export function buildTTSPlayer(container: HTMLElement, view: EpubReaderView): ()
 		slider.setAttr('max', String(Math.max(0, s.total - 1)));
 		slider.setAttr('value', String(s.index));
 		slider.disabled = s.total <= 1;
+		stopBtn.hidden = idle;
 		playIcon.empty();
 		setIcon(playIcon, s.active && !s.paused ? 'pause' : 'play');
 		playBtn.toggleClass('is-playing', s.active && !s.paused);

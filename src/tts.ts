@@ -21,6 +21,7 @@ import {
 	providerApiKey,
 	providerConfig,
 	providerPreset,
+	providerSecretKey,
 } from './tts-providers';
 import type { TtsProviderId } from './tts-providers';
 import { normalizeTtsRate } from './tts-rate';
@@ -535,6 +536,7 @@ export class ReaderTTS {
 				provider,
 				baseUrl: config.baseUrl,
 				apiKey: providerApiKey(s, provider),
+				secretKey: providerSecretKey(s, provider),
 				model: config.model,
 				channel: config.channel,
 				voice: s.ttsOnlineVoice,

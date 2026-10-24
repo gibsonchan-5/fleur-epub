@@ -19,6 +19,15 @@ import {
 	providerReady,
 } from './tts-providers';
 import type { DoubaoChannel, TtsVoicePreset } from './tts-providers';
+import {
+	TENCENT_MAX_CHARS,
+	TENCENT_SAMPLE_RATE,
+	buildTencentRequest,
+	concatBytes,
+	parseTencentResponse,
+	pcmToWav,
+	splitTextForLimit,
+} from './tts-tencent';
 
 export { TTS_PROVIDERS, providerPreset } from './tts-providers';
 
@@ -42,7 +51,10 @@ export interface OnlineTtsRequest {
 	/** 提供商 id；缺省按 OpenAI 兼容处理，兼容旧调用 */
 	provider?: string;
 	baseUrl: string;
+	/** 主密钥；腾讯云是 SecretId */
 	apiKey: string;
+	/** 第二把密钥：仅腾讯云使用（SecretKey，只在本机参与签名） */
+	secretKey?: string;
 	model: string;
 	voice: string;
 	/** 语速倍数（接口侧，1 = 正常） */
@@ -71,12 +83,23 @@ export async function synthesizeOnline(req: OnlineTtsRequest, text: string): Pro
 	const provider = req.provider && isCloudProvider(req.provider) ? req.provider : 'openai';
 	const preset = providerPreset(provider);
 	const apiKey = req.apiKey.trim();
+	const secretKey = (req.secretKey ?? '').trim();
 	const voice = req.voice.trim();
-	if (!apiKey) throw new Error(`未配置${preset?.label ?? '在线语音'}密钥`);
+	if (!apiKey) {
+		throw new Error(
+			provider === 'tencent'
+				? '未配置腾讯云 SecretId'
+				: `未配置${preset?.label ?? '在线语音'}密钥`,
+		);
+	}
+	if (preset?.secretKeyField && !secretKey) {
+		throw new Error('未配置腾讯云 SecretKey（访问管理里与 SecretId 配对的那把）');
+	}
 	if (!voice) throw new Error('未选择语音音色');
 
 	if (provider === 'doubao') return synthesizeDoubao(req, text, apiKey, voice);
 	if (provider === 'qwen') return synthesizeQwen(req, text, apiKey, voice);
+	if (provider === 'tencent') return synthesizeTencent(req, text, apiKey, secretKey, voice);
 	return synthesizeOpenAiCompatible(req, text, apiKey, voice);
 }
 
@@ -166,6 +189,58 @@ async function synthesizeQwen(
 	const buf = download.arrayBuffer;
 	if (!buf || buf.byteLength === 0) throw new Error('千问语音下载失败：空音频');
 	return new Blob([buf], { type: audio.mime });
+}
+
+/**
+ * 腾讯云 TextToVoice：双密钥 TC3 签名。单句超过 150 汉字时自动切块，
+ * 各片 PCM 按序拼接后套 WAV 头（时长与 seek 都准）。
+ */
+async function synthesizeTencent(
+	req: OnlineTtsRequest,
+	text: string,
+	secretId: string,
+	secretKey: string,
+	voice: string,
+): Promise<Blob> {
+	const pieces = splitTextForLimit(text, TENCENT_MAX_CHARS);
+	if (!pieces.length) throw new Error('没有可合成的文本');
+	const chunks: Uint8Array[] = [];
+	for (const piece of pieces) {
+		const built = buildTencentRequest({
+			secretId,
+			secretKey,
+			text: piece,
+			voice,
+			baseUrl: req.baseUrl,
+		});
+		const res = await requestUrl({
+			url: built.url,
+			method: 'POST',
+			contentType: 'application/json',
+			headers: built.headers,
+			body: built.body,
+			throw: false,
+		});
+		let payload: unknown = null;
+		try {
+			payload = JSON.parse(res.text || '{}');
+		} catch {
+			payload = null;
+		}
+		if (res.status >= 400) {
+			// 业务错误可能仍带 Response.Error，比裸状态码更能定位
+			if (payload) parseTencentResponse(payload);
+			const detail = detailOf(res.text);
+			throw new Error(`腾讯云语音合成失败（HTTP ${res.status}）${detail ? `：${detail}` : ''}`);
+		}
+		if (!payload) {
+			throw new Error(`腾讯云返回的不是 JSON（HTTP ${res.status}）；请检查接口地址是否指错了服务`);
+		}
+		chunks.push(parseTencentResponse(payload));
+	}
+	const pcm = concatBytes(chunks);
+	if (!pcm.length) throw new Error('腾讯云语音合成失败：返回空音频');
+	return blobFromBytes(pcmToWav(pcm, TENCENT_SAMPLE_RATE), 'audio/wav');
 }
 
 async function synthesizeOpenAiCompatible(

@@ -157,6 +157,10 @@ export default class FleurEpubPlugin extends Plugin {
 		// （数据目录跟随「跨设备同步批注数据」开关：开启后在 Vault 内，关闭时在配置目录）
 		await this.migrateBookFingerprints();
 
+		// 批注分片迁移：给已有主文件补一份本机分片（幂等）。不逐本打开也不会在整文件
+		// 被同步器覆盖时丢批注；后台跑，不阻塞启动。
+		void this.bookStore.migrateAnnotationsToShards();
+
 		// 独立生词本跨设备同步：注册 vault modify 监听 + 启动合并（开关关闭时内部直接跳过）
 		this.wordbookSync.init();
 
@@ -212,14 +216,18 @@ export default class FleurEpubPlugin extends Plugin {
 	}
 
 	/**
-	 * 数据目录迁移（一次性、幂等）：把 .obsidian/plugins/fleur-epub/data 下的书数据
-	 * 复制到 Vault 内普通目录（settings.dataDir，默认 FleurEpub/data）。
+	 * 数据目录迁移（幂等）：把 .obsidian/plugins/fleur-epub/data 下**缺失**的文件
+	 * （含 ann/<书指纹>/<设备ID>.json 分片子树）复制到 Vault 内普通目录
+	 * （settings.dataDir，默认 FleurEpub/data）。
 	 * 由设置页「跨设备同步批注数据」开关触发（用户自主选择），启动时不自动跑。
 	 *
 	 * 规则刻意保守，多端场景安全：
-	 * - 旧目录不存在 / 为空 → 无事可做（全新用户、已迁移后清空过）；
-	 * - 新目录已有 .json（另一端同步来的）→ **跳过**，绝不覆盖；
-	 * - 其余 → 逐个复制（同名不覆盖）；**旧目录保留不删**——它同时是关闭开关后的回退位置。
+	 * - 旧目录不存在 / 为空 → 无事可做；
+	 * - 新目录已有同名文件（另一端同步来的）→ **跳过该文件，不覆盖**；
+	 * - 其余 → 逐个复制（含子目录）；**旧目录保留不删**——它同时是关闭开关后的回退位置。
+	 *
+	 * 旧版在新目录已有任意 .json 时整段跳过，导致本机旧批注永远进不了同步目录；
+	 * 现在改成「只补缺」，既不会冲掉同步来的数据，也能把本机旧分片/旧文件带过去。
 	 */
 	async migrateDataDirIntoVault(): Promise<void> {
 		const adapter = this.app.vault.adapter;
@@ -228,29 +236,37 @@ export default class FleurEpubPlugin extends Plugin {
 		if (oldDir === newDir) return; // dataDir 为空回落旧位置时，无迁移可言
 		try {
 			if (!(await adapter.exists(oldDir))) return;
-			const oldFiles = (await adapter.list(oldDir)).files.filter((p) => p.endsWith('.json'));
-			if (!oldFiles.length) return;
-			let newFiles: string[] = [];
-			try {
-				newFiles = (await adapter.list(newDir)).files;
-			} catch {
-				// 新目录还不存在 → 视为空
-			}
-			if (newFiles.some((p) => p.endsWith('.json'))) return; // 同步来的数据优先
-			await this.ensureVaultDir(newDir);
-			let copied = 0;
-			for (const src of oldFiles) {
-				const name = src.split('/').pop() ?? src;
-				const dst = `${newDir}/${name}`;
-				if (await adapter.exists(dst)) continue;
-				await adapter.write(dst, await adapter.read(src));
-				copied++;
-			}
-			console.debug('[FleurEPUB] 数据目录迁移完成', oldDir, '→', newDir, `共 ${copied} 个文件`);
+			const copied = await this.copyMissingDir(oldDir, newDir);
+			console.debug('[FleurEPUB] 数据目录迁移完成', oldDir, '→', newDir, `共补充 ${copied} 个文件`);
 		} catch (e) {
 			// 迁移失败绝不阻塞启动：数据仍在旧目录，下次启动重试
 			console.warn('[FleurEPUB] 数据目录迁移失败（数据仍在原位置，将在下次启动重试）', e);
 		}
+	}
+
+	/** 递归复制缺失文件（不覆盖目标已有文件），返回复制数量 */
+	private async copyMissingDir(srcDir: string, dstDir: string): Promise<number> {
+		const adapter = this.app.vault.adapter;
+		let entries;
+		try {
+			entries = await adapter.list(srcDir);
+		} catch {
+			return 0; // 源目录不存在 → 无事可做
+		}
+		let copied = 0;
+		if (entries.files.length) await this.ensureVaultDir(dstDir);
+		for (const src of entries.files) {
+			const name = src.split('/').pop() ?? src;
+			const dst = `${dstDir}/${name}`;
+			if (await adapter.exists(dst)) continue;
+			await adapter.write(dst, await adapter.read(src));
+			copied++;
+		}
+		for (const folder of entries.folders) {
+			const name = folder.split('/').pop() ?? folder;
+			copied += await this.copyMissingDir(folder, `${dstDir}/${name}`);
+		}
+		return copied;
 	}
 
 	/** 逐级创建 Vault 内目录（adapter.mkdir 不保证递归创建） */

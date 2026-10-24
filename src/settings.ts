@@ -13,6 +13,8 @@ import {
 	providerApiKey,
 	providerConfig,
 	providerPreset,
+	providerReady,
+	providerSecretKey,
 	setProviderConfig,
 } from './tts-providers';
 import { getFleurDictBridge } from './dict-bridge';
@@ -159,6 +161,9 @@ export interface FleurEpubSettings {
 	ttsSiliconflowApiKey: string;
 	ttsDoubaoApiKey: string;
 	ttsQwenApiKey: string;
+	/** 腾讯云双密钥：SecretId 随请求头发出，SecretKey 只在本机签名 */
+	ttsTencentSecretId: string;
+	ttsTencentSecretKey: string;
 	ttsCustomApiKey: string;
 	/** 在线语音模型（如 tts-1 / FunAudioLLM/CosyVoice2-0.5B / qwen3-tts-flash） */
 	ttsOnlineModel: string;
@@ -244,6 +249,8 @@ export const DEFAULT_SETTINGS: FleurEpubSettings = {
 	ttsSiliconflowApiKey: '',
 	ttsDoubaoApiKey: '',
 	ttsQwenApiKey: '',
+	ttsTencentSecretId: '',
+	ttsTencentSecretKey: '',
 	ttsCustomApiKey: '',
 	ttsOnlineModel: 'tts-1',
 	ttsOnlineVoice: 'alloy',
@@ -901,13 +908,18 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 		});
 
 		const keyFields: Record<
-			'openai' | 'siliconflow' | 'doubao' | 'qwen',
-			'ttsOpenaiApiKey' | 'ttsSiliconflowApiKey' | 'ttsDoubaoApiKey' | 'ttsQwenApiKey'
+			'openai' | 'siliconflow' | 'doubao' | 'qwen' | 'tencent',
+			| 'ttsOpenaiApiKey'
+			| 'ttsSiliconflowApiKey'
+			| 'ttsDoubaoApiKey'
+			| 'ttsQwenApiKey'
+			| 'ttsTencentSecretId'
 		> = {
 			openai: 'ttsOpenaiApiKey',
 			siliconflow: 'ttsSiliconflowApiKey',
 			doubao: 'ttsDoubaoApiKey',
 			qwen: 'ttsQwenApiKey',
+			tencent: 'ttsTencentSecretId',
 		};
 
 		const doubaoKeyHint = (channel: string): string =>
@@ -915,16 +927,17 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 				? '使用火山方舟 Agent Plan 控制台创建的套餐专属 API Key；语音技术控制台的 Key 与普通方舟推理 Key 都不通用。'
 				: '使用火山引擎「语音技术 → API Key 管理」里的 API Key；它只适用于标准通道，方舟推理 Key 不能填在这里。';
 
-		for (const provider of ['openai', 'siliconflow', 'doubao', 'qwen'] as const) {
+		for (const provider of ['openai', 'siliconflow', 'doubao', 'qwen', 'tencent'] as const) {
 			const preset = TTS_PROVIDERS[provider];
 			const field = keyFields[provider];
+			const secretField = preset.secretKeyField as 'ttsTencentSecretKey' | undefined;
 			const active = settings.ttsOnlineProvider === provider;
 			const card = containerEl.createEl('details', { cls: 'fleur-epub-provider-card' });
 			if (active) card.setAttr('open', '');
 			const summary = card.createEl('summary', { cls: 'fleur-epub-provider-summary' });
 			summary.createSpan({ cls: 'fleur-epub-provider-name', text: preset.label });
 			if (active) summary.createSpan({ cls: 'fleur-epub-provider-tag', text: '当前使用' });
-			const configured = Boolean(providerApiKey(settings, provider));
+			const configured = providerReady(settings, provider);
 			const state = summary.createSpan({
 				cls: `fleur-epub-provider-state${configured ? ' is-ready' : ''}`,
 				text: configured ? '已配置' : '未配置',
@@ -932,6 +945,11 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 			const body = card.createDiv('fleur-epub-provider-body');
 			const config = providerConfig(settings, provider);
 			let keyDescEl: HTMLElement | null = null;
+			const refreshState = () => {
+				const ready = providerReady(settings, provider);
+				state.setText(ready ? '已配置' : '未配置');
+				state.toggleClass('is-ready', ready);
+			};
 
 			// 豆包有两条同协议但不同端点/密钥的通道，必须让用户明确选，避免把
 			// AgentPlan 套餐 Key 打到标准语音端点（或反过来）后得到 401。
@@ -961,7 +979,7 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 			const currentKey =
 				settings[field] || (provider === 'openai' ? settings.ttsOnlineApiKey : '');
 			const apiKeySetting = new Setting(body)
-				.setName('API Key')
+				.setName(preset.keyLabel ?? 'API Key')
 				.setDesc(
 					provider === 'doubao'
 						? doubaoKeyHint(config.channel ?? 'standard')
@@ -974,9 +992,7 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 						.onChange(async (v) => {
 							settings[field] = v.trim();
 							await this.plugin.saveSettings();
-							const ready = Boolean(v.trim());
-							state.setText(ready ? '已配置' : '未配置');
-							state.toggleClass('is-ready', ready);
+							refreshState();
 						});
 					text.inputEl.type = 'password';
 					text.inputEl.autocomplete = 'off';
@@ -984,12 +1000,34 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 				});
 			keyDescEl = apiKeySetting.descEl;
 
+			// 双密钥服务（腾讯云）：SecretKey 只在本机参与 TC3 签名，从不发出。
+			if (secretField) {
+				new Setting(body)
+					.setName('SecretKey')
+					.setDesc('与 SecretId 配对；只在本机参与签名，不会写进请求头、URL 或笔记。')
+					.addText((text) => {
+						text
+							.setPlaceholder('SecretKey')
+							.setValue(settings[secretField])
+							.onChange(async (v) => {
+								settings[secretField] = v.trim();
+								await this.plugin.saveSettings();
+								refreshState();
+							});
+						text.inputEl.type = 'password';
+						text.inputEl.autocomplete = 'off';
+						text.inputEl.spellcheck = false;
+					});
+			}
+
 			const endpointHint =
 				provider === 'doubao'
 					? '标准通道自动拼 /api/v3/tts/unidirectional，AgentPlan 通道自动拼 /api/v3/plan/tts/unidirectional'
 					: provider === 'qwen'
 						? '请求自动拼到 /api/v1/services/aigc/multimodal-generation/generation'
-						: '请求自动拼到 /audio/speech';
+						: provider === 'tencent'
+							? 'TextToVoice 接口，POST 到该地址，TC3-HMAC-SHA256 签名'
+							: '请求自动拼到 /audio/speech';
 			new Setting(body)
 				.setName('接口地址')
 				.setDesc(`默认 ${preset.baseUrl}，${endpointHint}；使用自建代理时可改。`)
@@ -1011,7 +1049,9 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 				.setDesc(
 					provider === 'doubao'
 						? '豆包语音合成 2.0 的资源 ID，决定计费与可用音色。'
-						: '服务商当前可用的语音模型。',
+						: provider === 'tencent'
+							? 'TextToVoice 接口版本（固定 2019-08-23）。'
+							: '服务商当前可用的语音模型。',
 				)
 				.addDropdown((drop) => {
 					const ids = new Set<string>();
@@ -1134,6 +1174,7 @@ export class FleurEpubSettingTab extends PluginSettingTab {
 								provider,
 								baseUrl: config.baseUrl,
 								apiKey: providerApiKey(settings, provider),
+								secretKey: providerSecretKey(settings, provider),
 								model: config.model,
 								channel: config.channel,
 								voice: settings.ttsOnlineVoice,

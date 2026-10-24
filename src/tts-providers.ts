@@ -2,9 +2,16 @@
 // 责任边界：只回答「有哪些声音」「怎么算就绪」「请求体长什么样」「响应怎么拆」，
 // 不做网络、不碰设置界面。
 
-export type TtsProviderId = 'system' | 'openai' | 'siliconflow' | 'doubao' | 'qwen' | 'custom';
+export type TtsProviderId =
+	| 'system'
+	| 'openai'
+	| 'siliconflow'
+	| 'doubao'
+	| 'qwen'
+	| 'tencent'
+	| 'custom';
 export type CloudTtsProviderId = Exclude<TtsProviderId, 'system'>;
-export type TtsProviderKind = 'openai' | 'doubao' | 'qwen';
+export type TtsProviderKind = 'openai' | 'doubao' | 'qwen' | 'tencent';
 
 export interface TtsVoicePreset {
 	id: string;
@@ -31,6 +38,10 @@ export interface TtsProviderPreset {
 	defaultVoice: string;
 	hint?: string;
 	keyPlaceholder?: string;
+	/** 主密钥的显示名；缺省「API Key」。腾讯云是 SecretId。 */
+	keyLabel?: string;
+	/** 第二把密钥的设置字段（腾讯云 SecretKey）；单密钥服务不设。 */
+	secretKeyField?: string;
 }
 
 export const TTS_PROVIDERS: Record<CloudTtsProviderId, TtsProviderPreset> = {
@@ -136,6 +147,30 @@ export const TTS_PROVIDERS: Record<CloudTtsProviderId, TtsProviderPreset> = {
 		hint: '任何 OpenAI 兼容的 /audio/speech 服务。',
 		voices: [],
 	},
+	tencent: {
+		id: 'tencent',
+		label: '腾讯云语音合成 · TextToVoice',
+		shortLabel: '腾讯云',
+		kind: 'tencent',
+		baseUrl: 'https://tts.tencentcloudapi.com',
+		model: '2019-08-23',
+		models: [{ id: '2019-08-23', label: 'TextToVoice（2019-08-23）' }],
+		defaultVoice: '101001',
+		keyPlaceholder: 'SecretId',
+		keyLabel: 'SecretId',
+		secretKeyField: 'ttsTencentSecretKey',
+		hint: 'TextToVoice 接口，双密钥鉴权：SecretId 随请求头发出，SecretKey 只在本机参与签名、从不发出。精品音色约 0.3 元/万字符（含 800 万免费额度），大模型音色约 1.2 元/万字符（10 万免费额度）。目录只收这两档，不含超自然音色。音色 id 是数字。',
+		voices: [
+			{ id: '101001', label: '智瑜', note: '精品·温柔女声', lang: 'zh' },
+			{ id: '101002', label: '智聆', note: '精品·知性女声', lang: 'zh' },
+			{ id: '101004', label: '智云', note: '精品·沉稳男声', lang: 'zh' },
+			{ id: '101013', label: '智辉', note: '精品·磁性男声', lang: 'zh' },
+			{ id: '501001', label: '智兰', note: '大模型·资讯女声', lang: 'zh' },
+			{ id: '501002', label: '智菊', note: '大模型·阅读女声', lang: 'zh' },
+			{ id: '501000', label: '智斌', note: '大模型·阅读男声', lang: 'zh' },
+			{ id: '501003', label: '智宇', note: '大模型·阅读男声', lang: 'zh' },
+		],
+	},
 };
 
 export function isCloudProvider(value: string): value is CloudTtsProviderId {
@@ -152,11 +187,18 @@ const PROVIDER_KEY_FIELDS: Record<CloudTtsProviderId, string> = {
 	siliconflow: 'ttsSiliconflowApiKey',
 	doubao: 'ttsDoubaoApiKey',
 	qwen: 'ttsQwenApiKey',
+	tencent: 'ttsTencentSecretId',
 	custom: 'ttsCustomApiKey',
 };
 
 export function providerKeyField(provider: CloudTtsProviderId): string {
 	return PROVIDER_KEY_FIELDS[provider];
+}
+
+/** 第二把密钥（腾讯云 SecretKey）；单密钥服务返回空串。 */
+export function providerSecretKey(settings: object, provider: string): string {
+	const field = providerPreset(provider)?.secretKeyField;
+	return field ? readString(settings, field) : '';
 }
 
 function readString(source: object, key: string): string {
@@ -178,11 +220,12 @@ export function providerApiKey(settings: object, provider: string): string {
 	return '';
 }
 
-/** 内置云服务只差一把密钥；自定义服务还必须有接口地址。 */
+/** 内置云服务只差密钥（腾讯云是双密钥）；自定义服务还必须有接口地址。 */
 export function providerReady(settings: object, provider: string): boolean {
 	if (provider === 'system') return true;
 	if (!isCloudProvider(provider)) return false;
 	if (!providerApiKey(settings, provider)) return false;
+	if (providerPreset(provider)?.secretKeyField && !providerSecretKey(settings, provider)) return false;
 	if (provider === 'custom') {
 		return /^https?:\/\//i.test(providerConfig(settings, provider).baseUrl);
 	}

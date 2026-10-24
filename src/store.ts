@@ -116,6 +116,48 @@ export interface SaveOutcome {
 	skipped?: boolean;
 }
 
+/**
+ * 每台设备自己的批注分片（第三期：防整文件覆盖）。
+ *
+ * 背景：主文件是「一本书一份」的整文件快照。Remotely Save 等同步器在两端都改过
+ * 同一文件时只能二选一（默认 keep_newer）——移动端还没收到桌面刚加的批注就先写了一版，
+ * 它的 mtime 更新，整份文件被保留，桌面那版静默消失。第二期的合并写只在「本机落盘时
+ * 发现磁盘被外部改过」才触发；文件被同步器在两次落盘之间替换掉，就完全绕过了合并。
+ *
+ * 分片把「一台设备一次写入」变成**各写各的文件**：
+ *   FleurEpub/data/ann/<书指纹>/<设备ID>.json
+ * 任何设备都只写自己那份，同步器永远不会在两台设备的分片之间二选一；
+ * 读的时候把主文件（兼容旧版与历史数据）+ 所有分片按 id/updatedAt 合并。
+ * 主文件仍然照常写完整快照，但即使它被旧版本覆盖，分片也能把批注带回来。
+ */
+export interface AnnotationShard {
+	deviceId?: string;
+	updatedAt?: number;
+	annotations: readonly EpubAnnotation[];
+}
+
+/** 设备标识：存在 localStorage（每台设备独立，不随任何同步服务走）。 */
+const DEVICE_ID_KEY = 'fleur-epub-device-id';
+
+/**
+ * 设备标识要直接拼进文件名，因此只保留安全字符。
+ * 配置目录里的回退文件可能被同步或手动改坏（`../` 之类），读入后必须再洗一遍。
+ */
+function sanitizeDeviceId(raw: string): string {
+	return raw.trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+}
+
+/** 生成设备标识：只留字母数字，直接当文件名用 */
+function makeDeviceId(): string {
+	try {
+		const c = (globalThis as { crypto?: Crypto }).crypto;
+		if (c?.randomUUID) return c.randomUUID().replace(/-/g, '').slice(0, 12);
+	} catch {
+		/* 老运行时不支持 randomUUID → 退化到时间戳 + 随机数 */
+	}
+	return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
 /** FNV-1a 32bit 哈希（纯前端可用，无 Node 依赖） */
 export function hashString(s: string): string {
 	let h = 0x811c9dc5;
@@ -224,11 +266,15 @@ export function pruneTombstones(
  *   · 同毫秒且删除态相同时，按条目内容的确定性序列化比较取大者 ——
  *     保证两端各自算出**完全相同**的结果与顺序，否则每次同步都会互相判为「被改过」而反复写盘；
  *   · 输出按 (createdAt, id) 排序而不是保留原顺序，同样是为了两端收敛。
+ *
+ * `prune`：落盘路径顺手回收过期墓碑；**load 路径传 false**——还读不到另一端时提前
+ * 抹掉墓碑会让它那条存活副本在下次合并时复活（见 pruneTombstones 的说明）。
  */
 export function mergeAnnotations(
 	local: readonly EpubAnnotation[] | null | undefined,
 	remote: readonly EpubAnnotation[] | null | undefined,
 	now: number = Date.now(),
+	prune = true,
 ): EpubAnnotation[] {
 	const byId = new Map<string, EpubAnnotation>();
 	const put = (a: EpubAnnotation) => {
@@ -257,7 +303,7 @@ export function mergeAnnotations(
 	for (const a of remote ?? []) put(a);
 	for (const a of local ?? []) put(a);
 
-	const out = pruneTombstones([...byId.values()], now);
+	const out = prune ? pruneTombstones([...byId.values()], now) : [...byId.values()];
 	out.sort((a, b) => {
 		const d = (a.createdAt ?? 0) - (b.createdAt ?? 0);
 		if (d) return d;
@@ -362,6 +408,9 @@ export class BookStore {
 	/** 已备份过的损坏内容（按路径）。同一份内容只备份一次，之后允许覆盖以自愈。 */
 	private corruptSeen = new Map<string, string>();
 
+	/** 本机设备标识（批注分片文件名）。懒加载，见 getDeviceId()。 */
+	private deviceIdCache: string | null = null;
+
 	constructor(private app: App, private plugin: Plugin) {}
 
 	/**
@@ -389,6 +438,70 @@ export class BookStore {
 		return `${this.dataDir()}/${fingerprint}.trans.json`;
 	}
 
+	/** 旧版（开启「跨设备同步批注数据」之前）的配置目录数据：只用来兜底合并批注。 */
+	private legacyDataDir(): string {
+		return `${this.app.vault.configDir}/plugins/fleur-epub/data`;
+	}
+
+	/** 本机批注分片目录：一本书一个子目录，里面每台设备一个文件。 */
+	private shardDir(fingerprint: string): string {
+		return `${this.dataDir()}/ann/${fingerprint}`;
+	}
+
+	private shardPath(fingerprint: string, deviceId: string): string {
+		return `${this.shardDir(fingerprint)}/${deviceId}.json`;
+	}
+
+	/**
+	 * 本机设备标识。优先 localStorage（每台设备独立，不会被 Remotely Save 带走）；
+	 * 不可用时退回配置目录里的文件。**刻意不读 settings.deviceId**：data.json 在
+	 * syncConfigDir=true 时会被同步，两端共用一个标识就会重新写同一份分片。
+	 */
+	private async getDeviceId(): Promise<string> {
+		if (this.deviceIdCache) return this.deviceIdCache;
+		let id = '';
+		try {
+			const ls = (globalThis as { localStorage?: Storage }).localStorage;
+			id = sanitizeDeviceId(ls?.getItem(DEVICE_ID_KEY) ?? '');
+			if (!id) {
+				id = makeDeviceId();
+				ls?.setItem(DEVICE_ID_KEY, id);
+			}
+		} catch {
+			/* localStorage 不可用（极旧运行时）→ 走配置文件 */
+		}
+		if (!id) {
+			const path = `${this.app.vault.configDir}/plugins/fleur-epub/device-id`;
+			try {
+				id = sanitizeDeviceId(await this.app.vault.adapter.read(path));
+			} catch {
+				/* 还没写过 */
+			}
+			if (!id) {
+				id = makeDeviceId();
+				try {
+					await this.app.vault.adapter.write(path, id);
+				} catch (e) {
+					// 写不进去也不能退回所有设备共用一个名字：本会话用临时标识，宁可多一个分片也不互相覆盖
+					console.warn('[FleurEPUB] 设备标识写入失败，本次会话使用临时标识', e);
+				}
+			}
+		}
+		this.deviceIdCache = id;
+		return id;
+	}
+
+	/** 逐级创建目录（adapter.mkdir 不保证递归） */
+	private async ensureDirPath(path: string): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const parts = path.split('/').filter(Boolean);
+		let cur = '';
+		for (const p of parts) {
+			cur = cur ? `${cur}/${p}` : p;
+			if (!(await adapter.exists(cur))) await adapter.mkdir(cur);
+		}
+	}
+
 	/** 读原文。区分「不存在」（常态，不留痕）与「真出错」（要留痕）——合并写与 load
 	 *  都需要原始字节串，所以这里返回 raw 而不是解析结果。 */
 	private async readRawText(
@@ -414,14 +527,120 @@ export class BookStore {
 		}
 	}
 
+	/** 读一本书的全部分片。目录不存在 / 某份坏掉都只跳过，绝不影响主文件。 */
+	private async readShards(fingerprint: string): Promise<EpubAnnotation[][]> {
+		const adapter = this.app.vault.adapter;
+		let files: string[] = [];
+		try {
+			files = (await adapter.list(this.shardDir(fingerprint))).files.filter((p) =>
+				p.endsWith('.json'),
+			);
+		} catch {
+			return [];
+		}
+		const out: EpubAnnotation[][] = [];
+		for (const path of files) {
+			const res = await this.readRawText(path);
+			if (!res.ok) continue;
+			const parsed = this.parseOrNull<AnnotationShard | EpubAnnotation[]>(res.raw);
+			if (!parsed) continue;
+			const list: unknown = Array.isArray(parsed) ? parsed : parsed.annotations;
+			if (Array.isArray(list)) out.push(list as EpubAnnotation[]);
+		}
+		return out;
+	}
+
+	/**
+	 * 旧配置目录里的批注：开启「跨设备同步批注数据」时，迁移逻辑在新目录已有文件时会跳过
+	 * （避免冲掉同步来的数据），于是本机旧批注会从界面上消失。这里把旧文件当**只读的
+	 * 额外分片**合并进来——用户删过的条目在同步目录里有更新的墓碑，按 updatedAt 仍会胜出。
+	 */
+	private async readLegacyAnnotations(fingerprint: string): Promise<EpubAnnotation[]> {
+		const legacy = this.legacyDataDir();
+		if (legacy === this.dataDir()) return [];
+		const res = await this.readRawText(`${legacy}/${fingerprint}.json`);
+		if (!res.ok) return [];
+		const data = this.parseOrNull<BookData>(res.raw);
+		return Array.isArray(data?.annotations) ? data.annotations : [];
+	}
+
+	/** 写本机分片。只写自己的文件，因此不需要跟别的设备抢；失败只留痕，不阻断主文件。 */
+	private async writeShard(
+		fingerprint: string,
+		annotations: readonly EpubAnnotation[],
+		deviceId: string,
+	): Promise<void> {
+		const path = this.shardPath(fingerprint, deviceId);
+		const payload = JSON.stringify(
+			{ deviceId, updatedAt: Date.now(), annotations } satisfies AnnotationShard,
+			null,
+			2,
+		);
+		try {
+			await this.queued(path, async () => {
+				// 没有批注且从未建过分片 → 不制造空文件；已有分片则照写（可能刚把最后一条删完）
+				if (!annotations.length && !(await this.app.vault.adapter.exists(path))) return;
+				await this.ensureDirPath(this.shardDir(fingerprint));
+				await this.app.vault.adapter.write(path, payload);
+			});
+		} catch (e) {
+			console.warn('[FleurEPUB] 保存批注分片失败', path, e);
+		}
+	}
+
+	/**
+	 * 启动迁移：给已有主文件补一份本机分片（幂等）。这样**不需要逐本打开**，
+	 * 升级后整库的批注就先落进各自设备的分片，后续同步再怎么整文件覆盖也带不走。
+	 * 分片已存在 → 跳过（绝不拿主文件里的旧快照覆盖它）。
+	 */
+	async migrateAnnotationsToShards(): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		let files: string[] = [];
+		try {
+			files = (await adapter.list(this.dataDir())).files;
+		} catch {
+			return;
+		}
+		const deviceId = await this.getDeviceId();
+		let created = 0;
+		for (const path of files) {
+			const name = path.split('/').pop() ?? path;
+			if (!isMainDataFileName(name)) continue;
+			const fingerprint = name.slice(0, -'.json'.length);
+			const shard = this.shardPath(fingerprint, deviceId);
+			if (await adapter.exists(shard)) continue;
+			const res = await this.readRawText(path);
+			if (!res.ok) continue;
+			const data = this.parseOrNull<BookData>(res.raw);
+			const list = data?.annotations;
+			if (!Array.isArray(list) || !list.length) continue;
+			await this.queued(shard, async () => {
+				if (await adapter.exists(shard)) return;
+				await this.ensureDirPath(this.shardDir(fingerprint));
+				await adapter.write(
+					shard,
+					JSON.stringify(
+						{ deviceId, updatedAt: Date.now(), annotations: list } satisfies AnnotationShard,
+						null,
+						2,
+					),
+				);
+			});
+			created++;
+		}
+		if (created) console.debug(`[FleurEPUB] 批注分片迁移完成：${created} 本`);
+	}
+
 	async load(fingerprint: string): Promise<BookData | null> {
 		const mainPath = this.mainPath(fingerprint);
 		const progressPath = this.progressPath(fingerprint);
-		// 三个域并发读；单个域坏掉只是该域回落，其余照常
-		const [mainRes, scopedRes, transRes] = await Promise.all([
+		// 三个域并发读；单个域坏掉只是该域回落，其余照常。分片/旧目录也在这里一起读。
+		const [mainRes, scopedRes, transRes, shards, legacyAnns] = await Promise.all([
 			this.readRawText(mainPath),
 			this.readRawText(progressPath),
 			this.readRawText(this.transPath(fingerprint)),
+			this.readShards(fingerprint),
+			this.readLegacyAnnotations(fingerprint),
 		]);
 		const mainText = mainRes.ok ? mainRes.raw : '';
 		const scopedText = scopedRes.ok ? scopedRes.raw : '';
@@ -435,18 +654,26 @@ export class BookStore {
 		const scoped = this.parseOrNull<BookProgress>(scopedText);
 		const trans = this.parseOrNull<Record<string, string>>(transText);
 
-		// 三域皆无 → 新书（或数据被清），交由调用方建默认值
-		if (!main && !scoped && !trans) return null;
+		// 三域皆无 → 新书（或数据被清）。但分片还在时不能当新书：主文件被同步器覆盖/清掉，
+		// 分片正是用来把批注带回来的。
+		if (!main && !scoped && !trans && !shards.length && !legacyAnns.length) return null;
 		// 译文域已在磁盘上 → 后续批注保存不必再顺手补写它
 		if (trans) this.transPersisted.add(fingerprint);
 
 		const base: Partial<BookData> = main ?? {};
+		// 主文件（兼容旧版/历史快照）+ 旧配置目录 + 全部分片，按 id/updatedAt 取并集。
+		// load 不回收墓碑：另一端还没同步到的删除，提前抹掉会让它的存活副本复活。
+		let annotations = Array.isArray(base.annotations) ? base.annotations : [];
+		for (const list of shards) annotations = mergeAnnotations(annotations, list, Date.now(), false);
+		if (legacyAnns.length) {
+			annotations = mergeAnnotations(annotations, legacyAnns, Date.now(), false);
+		}
 		const data: BookData = {
 			...base,
 			fingerprint,
 			book: base.book ?? {},
 			// 注意：保留墓碑，不在 load 时回收 —— 提前抹掉会让另一端的存活副本复活
-			annotations: Array.isArray(base.annotations) ? base.annotations : [],
+			annotations,
 			progress: pickNewerProgress(base.progress, scoped),
 		};
 		// 旧版把译文写在主文件里、新版写在 .trans.json，升级期两份可能并存 → 取并集
@@ -537,33 +764,48 @@ export class BookStore {
 
 		if (scope === 'all' || scope === 'annotations') {
 			const path = this.mainPath(fp);
+			const deviceId = await this.getDeviceId();
 			jobs.push(
 				this.queued(path, async () => {
+					const before = data.annotations ?? [];
+					let merged = before;
 					const disk = await this.readDiskForMerge(path, fp);
 					if (disk.kind === 'corrupt') {
-						// 损坏保护：磁盘原文件一个字节都不动，等用户/我们处置
+						// 损坏保护：磁盘原文件一个字节都不动，等用户/我们处置。
+						// 但本机已知批注仍要落进自己的分片——主文件坏了不等于数据该丢。
 						outcome.corruptBackup = disk.backup;
 						outcome.skipped = true;
+						for (const list of await this.readShards(fp)) {
+							merged = mergeAnnotations(merged, list, Date.now(), false);
+						}
+						data.annotations = merged;
+						await this.writeShard(fp, merged, deviceId);
 						return;
 					}
 					if (disk.kind === 'content') {
 						const diskData = this.parseOrNull<BookData>(disk.raw);
 						if (diskData) {
-							const local = data.annotations ?? [];
-							const known = new Set(local.map(annotationKey));
-							const merged = mergeAnnotations(local, diskData.annotations);
-							for (const a of merged) {
-								if (!known.has(annotationKey(a)) && !isAnnotationDeleted(a)) outcome.absorbed.push(a);
-							}
-							data.annotations = merged;
+							merged = mergeAnnotations(merged, diskData.annotations);
 							// 元信息：只补本地缺的字段，不覆盖本地已有值
 							const diskBook = diskData.book ?? {};
 							for (const k of Object.keys(diskBook) as Array<keyof BookMeta>) {
 								if (!data.book[k] && diskBook[k]) data.book[k] = diskBook[k];
 							}
-							outcome.merged = true;
 						}
 					}
+					// 分片也要并进来：另一端刚同步到的分片可能晚于本次开书时的 load。
+					// 这一步是「整文件被旧版本覆盖」之后仍能自愈的关键。
+					for (const list of await this.readShards(fp)) {
+						merged = mergeAnnotations(merged, list);
+					}
+					const known = new Set(before.map(annotationKey));
+					for (const a of merged) {
+						if (!known.has(annotationKey(a)) && !isAnnotationDeleted(a)) outcome.absorbed.push(a);
+					}
+					if (canonicalJson(merged) !== canonicalJson(before)) outcome.merged = true;
+					data.annotations = merged;
+					// 先写本机分片（同步器永远不会拿它跟别的设备二选一），再写主文件兼容旧版
+					await this.writeShard(fp, merged, deviceId);
 					// translations: undefined 会被 JSON.stringify 整个跳过，将来 BookData 加字段不必改这里
 					await this.writeNow(
 						path,

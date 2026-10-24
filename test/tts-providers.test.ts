@@ -16,6 +16,7 @@ import {
 	providerApiKey,
 	providerConfig,
 	providerReady,
+	providerSecretKey,
 	setProviderConfig,
 } from '../src/tts-providers.ts';
 import type { TtsSelectionSettings } from '../src/tts-providers.ts';
@@ -33,6 +34,8 @@ function baseSettings(): TtsSelectionSettings & Record<string, unknown> {
 		ttsSiliconflowApiKey: '',
 		ttsDoubaoApiKey: '',
 		ttsQwenApiKey: '',
+		ttsTencentSecretId: '',
+		ttsTencentSecretKey: '',
 		ttsCustomApiKey: '',
 	};
 }
@@ -45,11 +48,36 @@ test('密钥读取：各提供商独立保存，旧版单一密钥只回退给 O
 	assert.equal(providerApiKey(s, 'custom'), 'legacy-key');
 	assert.equal(providerApiKey(s, 'doubao'), '');
 	assert.equal(providerApiKey(s, 'qwen'), '');
+	assert.equal(providerApiKey(s, 'tencent'), '');
 
 	s.ttsDoubaoApiKey = 'doubao-key';
 	s.ttsQwenApiKey = 'qwen-key';
+	s.ttsTencentSecretId = 'secret-id';
 	assert.equal(providerApiKey(s, 'doubao'), 'doubao-key');
 	assert.equal(providerApiKey(s, 'qwen'), 'qwen-key');
+	assert.equal(providerApiKey(s, 'tencent'), 'secret-id');
+	// 双密钥：SecretKey 是第二把，不能和 SecretId 混读
+	assert.equal(providerSecretKey(s, 'tencent'), '');
+	assert.equal(providerSecretKey(s, 'openai'), '');
+});
+
+test('腾讯云就绪：SecretId 与 SecretKey 缺一不可', () => {
+	const s = baseSettings();
+	assert.equal(providerReady(s, 'tencent'), false);
+	s.ttsTencentSecretId = 'id';
+	assert.equal(providerReady(s, 'tencent'), false);
+	s.ttsTencentSecretKey = 'key';
+	assert.equal(providerReady(s, 'tencent'), true);
+});
+
+test('腾讯云音色目录：只收精品与大模型，不含超自然音色', () => {
+	const p = TTS_PROVIDERS.tencent;
+	assert.ok(p.voices.length >= 4);
+	for (const v of p.voices) {
+		// 精品是 101xxx，大模型是 501xxx；40xxxx / 502xxx 属超自然大模型，单价更高
+		assert.match(v.id, /^(101|501)\d{3}$/, `超范围音色 ${v.id}`);
+	}
+	assert.equal(p.defaultVoice, '101001');
 });
 
 test('就绪判断：内置云服务只需要密钥，自定义还需要接口地址', () => {
