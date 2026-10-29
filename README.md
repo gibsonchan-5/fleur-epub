@@ -61,6 +61,7 @@ Obsidian 的 EPUB 阅读插件，基于 foliate-js 渲染，延续 FleurPDF 的�
 > - AI annotations and chat send the selected text and your prompt to the AI endpoint you configure.
 > - Cloud read-aloud sends the sentence being read to the TTS provider you select. System voices are handled by your operating system, not by the configured TTS provider.
 > - Font downloads fetch the chosen font file from that font's listed source.
+> - Markdown comments are rendered as rich text; a comment that embeds a remote image loads that image, exactly as the same Markdown would in a note.
 >
 > API keys are stored in the system keychain by default (Obsidian 1.11.4+). If you choose the `data.json` option, keys are stored in clear text and travel with your vault. Books, annotations and reading data stay in your vault. 无遥测上报；只有你主动使用对应功能时才会发起上述请求。密钥默认存入系统钥匙串；选择 `data.json` 时则为明文并随 vault 同步。
 
