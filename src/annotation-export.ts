@@ -6,7 +6,7 @@ import { Notice } from 'obsidian';
 import type FleurEpubPlugin from './main';
 import type { EpubReaderView } from './reader-view';
 import { resolveAnnotationColor } from './reader-view';
-import { cleanAnnotationText } from './text-utils';
+import { cleanAnnotationText, hasMarkdownSyntax } from './text-utils';
 
 /** 按背景亮度选可读前景色（导出 Markdown 高亮底色用） */
 function pickReadableFg(bg: string): string {
@@ -22,6 +22,21 @@ function pickReadableFg(bg: string): string {
 /** 空白收敛为单行（EPUB 选段常带换行） */
 function normalizeWhitespace(s: string): string {
 	return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 批注正文写进导出笔记：AI 批注是 Markdown → 逐行引用以保留原有结构（标题/列表/表格）；
+ * 手写批注压成单行，避免导出文件里铺开一大段。
+ */
+function commentToQuote(comment: string): string {
+	const raw = comment.trim();
+	if (hasMarkdownSyntax(raw)) {
+		return raw
+			.split('\n')
+			.map((line) => (line.trim() ? `> ${line}` : '>'))
+			.join('\n');
+	}
+	return `> ${cleanAnnotationText(normalizeWhitespace(raw))}`;
 }
 
 /** 导出当前阅读书的全部批注为 Markdown 笔记 */
@@ -69,7 +84,7 @@ export async function exportAnnotationsToNote(plugin: FleurEpubPlugin, reader: E
 					const style = ann.kind === 'wavy' ? 'wavy' : 'solid';
 					md += `<span style="text-decoration:underline;text-decoration-color:${color};text-decoration-style:${style}">${t}</span>\n\n`;
 				}
-				if (ann.comment) md += `> ${cleanAnnotationText(normalizeWhitespace(ann.comment))}\n\n`;
+				if (ann.comment) md += `${commentToQuote(ann.comment)}\n\n`;
 				md += `---\n\n`;
 			}
 		}

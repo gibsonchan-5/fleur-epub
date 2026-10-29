@@ -9,7 +9,8 @@ import { resolveAnnotationColor } from './reader-view';
 import { compare as CFIcompare } from '../vendor/foliate-js/epubcfi.js';
 import { AIService } from './ai-service';
 import { resolveSystemPrompt } from './ai-prompts';
-import { stripMarkdown, cleanAnnotationText } from './text-utils';
+import { cleanAnnotationText, stripAnnotationHeader } from './text-utils';
+import { isMarkdownComment, renderAnnotationContent } from './annotation-render';
 import { exportAnnotationsToNote } from './annotation-export';
 import { isMobileUI } from './platform';
 import type { EpubAnnotation } from './store';
@@ -609,20 +610,22 @@ export class ShelfView extends ItemView {
 		footer.textContent = new Date(ann.createdAt).toLocaleString('zh-CN');
 	}
 
-	/** 批注显示：纯文本（去 MD 源码）+ 长批注折叠 + 悬停编辑/删除 */
+	/** 批注显示：Markdown 批注按富文本渲染、纯文本批注原样展示；长批注折叠 + 悬停编辑/删除 */
 	private renderCommentDisplay(slot: HTMLElement, ann: EpubAnnotation): void {
 		slot.empty();
 		const wrap = slot.createDiv('fleur-epub-comment-display');
 		const text = wrap.createDiv('fleur-epub-comment-text');
-		const plain = ann.comment ? cleanAnnotationText(normalizeWhitespace(ann.comment)) : '';
-		text.textContent = plain;
+		const raw = (ann.comment ?? '').trim();
+		const mdComment = isMarkdownComment(raw);
 
-		// 按「实际渲染行数」折叠：超过 3 行（与 CSS line-clamp 一致）才显示展开/收起。
+		// 按「实际渲染行数」折叠：超过上限才显示展开/收起。
 		// 不能按字符数判定——窄侧边栏里 120 字符早已十多行，会导致长批注整段铺开。
-		window.requestAnimationFrame(() => {
+		// 富文本的标题/段落本身占行，上限放宽到 6 行，否则一进来只看到标题。
+		const applyClamp = () => {
 			if (!text.isConnected) return;
+			const maxLines = mdComment ? 6 : 3;
 			const lineH = parseFloat(getComputedStyle(text).lineHeight) || 18;
-			if (text.scrollHeight > lineH * 3 + 2) {
+			if (text.scrollHeight > lineH * maxLines + 2) {
 				text.addClass('is-clamped');
 				const toggle = wrap.createDiv({ text: '展开全文', cls: 'fleur-epub-comment-toggle' });
 				toggle.addEventListener('click', () => {
@@ -635,7 +638,15 @@ export class ShelfView extends ItemView {
 					}
 				});
 			}
-		});
+		};
+
+		if (mdComment) {
+			// 渲染完成才知道真实高度，折叠判定放到 resolve 之后
+			void renderAnnotationContent(text, raw, this, this.app).then(applyClamp);
+		} else {
+			text.textContent = cleanAnnotationText(normalizeWhitespace(raw));
+			window.requestAnimationFrame(applyClamp);
+		}
 
 		const ops = wrap.createDiv('fleur-epub-comment-ops');
 		const editBtn = ops.createEl('button', 'fleur-epub-comment-ops-btn');
@@ -749,8 +760,9 @@ export class ShelfView extends ItemView {
 				streamEl.textContent += chunk;
 			},
 			() => {
-				// 存储前清洗：去 Markdown 标记 + 去「批注：×××」标题行（批注内容不出现原文）
-				const val = cleanAnnotationText(full.join('').trim());
+				// 存储保留 AI 返回的 Markdown 结构（展示层渲染富文本）；
+				// 只去掉「批注：×××」标题行——批注内容不重复原文
+				const val = stripAnnotationHeader(full.join('').trim());
 				if (!val) {
 					new Notice('AI 未返回内容');
 					this.renderAddCommentHint(slot, ann);

@@ -487,7 +487,7 @@
 }
 
 /* ── 批注编辑弹窗：fleurPDF Comment Dialog 式（引用块 + 注释标签 + 输入 + 按钮） ──
-   高度自适应内容，按钮行永远可见；标题栏可拖拽（位置记忆）、右下角手柄只调宽度 */
+   高度自适应内容，按钮行永远可见；标题栏可拖拽（位置当次有效）、右下角手柄调宽度与输入框高度 */
 .fleur-epub-annpop {
 	position: fixed;
 	z-index: 10010;
@@ -606,6 +606,8 @@
 	letter-spacing: 0.01em;
 	max-height: 110px;
 	overflow-y: auto;
+	/* 覆盖式滚动条会压在文字上（macOS），留出条宽 */
+	padding-right: 10px;
 	word-break: break-word;
 	user-select: text;
 	-webkit-user-select: text;
@@ -631,7 +633,8 @@
 	border-radius: 8px;
 	background: var(--background-primary);
 	color: var(--text-normal);
-	resize: vertical;
+	/* 高度统一由弹窗右下角手柄调整（记忆宽度+高度），不再留 textarea 自身的缩放角 */
+	resize: none;
 	font-family: inherit;
 	box-sizing: border-box;
 	transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -752,6 +755,98 @@ body.fleur-epub-mobile .fleur-epub-annpop-input {
 	word-break: break-word;
 }
 
+/* ── 批注正文的富文本渲染（AI 批注为 Markdown）──
+   气泡 / 侧边栏卡片 / 移动端批注卡共用；批注是窄容器，把标题、段落、
+   表格统一收紧到与批注字号一致，避免 Markdown 渲染出大标题把卡片撑变形。 */
+.fleur-epub-md {
+	white-space: normal;
+	word-break: break-word;
+}
+.fleur-epub-md > :first-child {
+	margin-top: 0;
+}
+.fleur-epub-md > :last-child {
+	margin-bottom: 0;
+}
+.fleur-epub-md h1,
+.fleur-epub-md h2,
+.fleur-epub-md h3,
+.fleur-epub-md h4,
+.fleur-epub-md h5,
+.fleur-epub-md h6 {
+	font-size: 1.02em;
+	font-weight: 600;
+	line-height: 1.45;
+	margin: 0.7em 0 0.3em;
+}
+.fleur-epub-md p {
+	margin: 0.35em 0;
+}
+.fleur-epub-md ul,
+.fleur-epub-md ol {
+	margin: 0.35em 0;
+	padding-inline-start: 1.4em;
+}
+.fleur-epub-md li {
+	margin: 0.12em 0;
+}
+.fleur-epub-md li > p {
+	margin: 0.12em 0;
+}
+.fleur-epub-md blockquote {
+	margin: 0.4em 0;
+	padding: 0.1em 0 0.1em 0.7em;
+	border-left: 2px solid var(--background-modifier-border);
+	color: var(--text-muted);
+}
+.fleur-epub-md blockquote p {
+	margin: 0.2em 0;
+}
+.fleur-epub-md table {
+	display: block;
+	max-width: 100%;
+	overflow-x: auto;
+	border-collapse: collapse;
+	font-size: 0.95em;
+	margin: 0.4em 0;
+}
+.fleur-epub-md th,
+.fleur-epub-md td {
+	border: 1px solid var(--background-modifier-border);
+	padding: 2px 6px;
+	text-align: start;
+	vertical-align: top;
+}
+.fleur-epub-md hr {
+	margin: 0.6em 0;
+	border: none;
+	border-top: 1px solid var(--background-modifier-border);
+}
+.fleur-epub-md code {
+	font-size: 0.92em;
+	padding: 0 3px;
+	border-radius: 3px;
+	background: var(--background-modifier-hover);
+}
+.fleur-epub-md pre {
+	overflow-x: auto;
+}
+.fleur-epub-md img {
+	max-width: 100%;
+	height: auto;
+}
+.fleur-epub-md a {
+	color: var(--text-accent);
+}
+
+/* 移动端轻量批注卡：富文本内容限高滚动，编辑/删除工具栏始终可见 */
+.fleur-epub-annquick .fleur-epub-annview-text.fleur-epub-md {
+	max-height: min(40vh, 300px);
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding-right: 10px;
+}
+
 /* 「展开全文 › / 收起 ▲」切换（对齐 FleurAnnotation tooltip） */
 .fleur-epub-annview-toggle {
 	font-size: 11px;
@@ -762,6 +857,60 @@ body.fleur-epub-mobile .fleur-epub-annpop-input {
 }
 .fleur-epub-annview-toggle:hover {
 	color: var(--text-muted);
+}
+
+/* ── 查看气泡的底部操作行：编辑批注 / 清除高亮与批注 ──
+   气泡本身限高，改成纵向 flex：正文区自己滚动，操作行钉在底部始终可点。
+   常驻可见（低对比图标），不做 hover 才现形——移动端没有 hover，桌面也少一层猜。 */
+.fleur-epub-annview.is-actionable {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	padding-bottom: 0;
+}
+.fleur-epub-annview.is-actionable .fleur-epub-annview-text {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	/* 覆盖式滚动条会压在最后一列字上（macOS），留出条宽 */
+	padding-right: 10px;
+}
+.fleur-epub-annview-actions {
+	flex: 0 0 auto;
+	display: flex;
+	justify-content: flex-end;
+	gap: 2px;
+	margin: 2px -14px 0;
+	padding: 3px 10px 5px;
+	border-top: 1px solid var(--background-modifier-border);
+}
+.fleur-epub-annview-action {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	border-radius: 4px;
+	color: var(--text-faint);
+	cursor: pointer;
+	transition: color 0.12s ease, background 0.12s ease;
+}
+.fleur-epub-annview-action:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+.fleur-epub-annview-action.is-danger:hover {
+	color: var(--text-error);
+	background: var(--background-modifier-error-hover);
+}
+.fleur-epub-annview-action svg {
+	width: 14px;
+	height: 14px;
 }
 
 /* ── 脚注卡片（微信读书式）：点脚注引用 → 就地弹内容卡，不跳转 ──
@@ -1393,11 +1542,17 @@ body.fleur-epub-mobile .fleur-epub-annquick-icon svg {
 	white-space: pre-wrap;
 	word-break: break-word;
 }
+/* 富文本批注：段落/标题自己管换行，不能继承 pre-wrap（会在块之间多出空行） */
+.fleur-epub-comment-text.fleur-epub-md {
+	white-space: normal;
+}
+/* 折叠用 max-height：纯文本 3 行；富文本放宽到 6 行——否则一进来只看到标题 */
 .fleur-epub-comment-text.is-clamped {
-	display: -webkit-box;
-	-webkit-line-clamp: 3;
-	-webkit-box-orient: vertical;
+	max-height: 4.65em;
 	overflow: hidden;
+}
+.fleur-epub-comment-text.fleur-epub-md.is-clamped {
+	max-height: 9.3em;
 }
 .fleur-epub-comment-toggle {
 	font-size: 11px;

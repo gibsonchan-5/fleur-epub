@@ -12,6 +12,7 @@ import { Overlayer } from '../vendor/foliate-js/overlayer.js';
 import { AIChatPanel } from './ai-chat-modal';
 import { exportAnnotationsToNote } from './annotation-export';
 import { cleanAnnotationText } from './text-utils';
+import { isMarkdownComment, renderAnnotationContent } from './annotation-render';
 import { TranslationEngine, findParagraphEl, collectParagraphs } from './translator';
 import type { ReaderTheme } from './settings';
 import { isMobileUI } from './platform';
@@ -2928,7 +2929,9 @@ export class EpubReaderView extends FileView {
 
 		// 纯高亮 / 划线（无批注内容）：点按不给「批注内容」，直接给清除动作（微信读书式）。
 		// 把高亮原文当批注内容展示是错误的语义——高亮不是批注。
-		const comment = cleanAnnotationText(ann.comment ?? '');
+		const raw = (ann.comment ?? '').trim();
+		const mdComment = isMarkdownComment(raw);
+		const comment = mdComment ? raw : cleanAnnotationText(raw);
 		if (!comment) {
 			const clearLabel = this.describeAnnotation(ann);
 			// 清除专用卡：单动作、更紧凑（移动端按 is-clear-only 收窄内边距与按钮尺寸）
@@ -2948,21 +2951,27 @@ export class EpubReaderView extends FileView {
 			return;
 		}
 
-		// 内容区：批注文字（120 字截断 + 展开切换）
-		const MAX_CHARS = 120;
-		const isLong = comment.length > MAX_CHARS;
-		let expanded = false;
+		// 内容区：AI 批注是 Markdown → 富文本渲染 + 限高滚动；手写批注保持纯文本（120 字截断 + 展开切换）
 		const content = pop.createDiv('fleur-epub-annview-text');
-		content.setText(isLong ? comment.slice(0, MAX_CHARS) + '...' : comment);
-		if (isLong) {
-			const hint = pop.createDiv('fleur-epub-annview-toggle');
-			hint.setText('展开全文 ›');
-			hint.addEventListener('click', (e) => {
-				e.stopPropagation();
-				expanded = !expanded;
-				content.setText(expanded ? comment : comment.slice(0, MAX_CHARS) + '...');
-				hint.setText(expanded ? '收起 ▲' : '展开全文 ›');
+		if (mdComment) {
+			void renderAnnotationContent(content, comment, this, this.app).then(() => {
+				if (pop.isConnected) this.placeAnnPopup(pop, host.x, host.y);
 			});
+		} else {
+			const MAX_CHARS = 120;
+			const isLong = comment.length > MAX_CHARS;
+			let expanded = false;
+			content.setText(isLong ? comment.slice(0, MAX_CHARS) + '...' : comment);
+			if (isLong) {
+				const hint = pop.createDiv('fleur-epub-annview-toggle');
+				hint.setText('展开全文 ›');
+				hint.addEventListener('click', (e) => {
+					e.stopPropagation();
+					expanded = !expanded;
+					content.setText(expanded ? comment : comment.slice(0, MAX_CHARS) + '...');
+					hint.setText(expanded ? '收起 ▲' : '展开全文 ›');
+				});
+			}
 		}
 
 		// 小工具栏：纯图标按钮（编辑 / 删除），不带文字
@@ -2999,7 +3008,7 @@ export class EpubReaderView extends FileView {
 		const pop = document.body.createDiv('fleur-epub-annpop');
 		this.annPopup = pop;
 
-		// 只恢复用户记忆的宽度；高度自适应内容（此前高度记忆会遮住底部按钮行，已废弃）
+		// 恢复用户记忆的宽度；输入框高度也恢复（由右下角手柄调整并记忆）
 		const savedSize = this.plugin.settings.annPopSize;
 		if (savedSize?.w) {
 			pop.setCssStyles({ width: `${savedSize.w}px` });
@@ -3037,15 +3046,18 @@ export class EpubReaderView extends FileView {
 		header.addEventListener('pointerup', endDrag);
 		header.addEventListener('pointercancel', endDrag);
 
-		// 右下角缩放手柄：只调宽度（高度由内容自适应，不出屏）
+		// 右下角缩放手柄：横向调宽度、纵向调输入框高度（两者都记忆；按钮行始终留在可见带内）
 		const resize = pop.createDiv('fleur-epub-annpop-resize');
 		resize.setAttribute('aria-label', '调整大小');
-		let rs: { sx: number; sy: number; w: number } | null = null;
+		let taEl: HTMLTextAreaElement | null = null;
+		let rs: { sx: number; sy: number; w: number; h: number } | null = null;
 		resize.addEventListener('pointerdown', (e) => {
 			e.preventDefault();
 			e.stopPropagation();
 			const rect = pop.getBoundingClientRect();
-			rs = { sx: e.clientX, sy: e.clientY, w: rect.width };
+			rs = { sx: e.clientX, sy: e.clientY, w: rect.width, h: taEl?.offsetHeight ?? 0 };
+			// 之前为不出屏压过 max-height → 拖拽时先解除，交给本次拖拽控制
+			taEl?.style.removeProperty('max-height');
 			try {
 				resize.setPointerCapture(e.pointerId);
 			} catch { /* 忽略 */ }
@@ -3054,12 +3066,23 @@ export class EpubReaderView extends FileView {
 			if (!rs) return;
 			const w = Math.max(260, Math.min(rs.w + e.clientX - rs.sx, window.innerWidth - 16));
 			pop.setCssStyles({ width: `${w}px` });
+			if (!taEl) return;
+			// 高度上限：固定区（标题/引用/标签/按钮行）之外的可见带余量，别把按钮行推出屏
+			const popRect = pop.getBoundingClientRect();
+			const fixed = popRect.height - taEl.offsetHeight;
+			const room = this.visibleBandBottom() - 8 - popRect.top - fixed;
+			const maxH = Math.max(rs.h, Math.min(room, window.innerHeight - 200));
+			const h = Math.max(96, Math.min(rs.h + e.clientY - rs.sy, maxH));
+			taEl.style.height = `${Math.round(h)}px`;
 		});
 		const endResize = () => {
 			if (!rs) return;
 			rs = null;
 			const rect = pop.getBoundingClientRect();
-			this.plugin.settings.annPopSize = { w: Math.round(rect.width), h: 0 };
+			this.plugin.settings.annPopSize = {
+				w: Math.round(rect.width),
+				h: taEl ? Math.round(taEl.offsetHeight) : 0,
+			};
 			void this.plugin.saveSettings();
 		};
 		resize.addEventListener('pointerup', endResize);
@@ -3076,8 +3099,10 @@ export class EpubReaderView extends FileView {
 		}
 		body.createDiv('fleur-epub-annpop-label').setText('注释');
 		const ta = body.createEl('textarea', 'fleur-epub-annpop-input');
+		taEl = ta;
 		ta.placeholder = '写下你的想法…';
 		ta.value = ann.comment ?? '';
+		if (savedSize?.h) ta.style.height = `${Math.max(96, Math.round(savedSize.h))}px`;
 
 		const doSave = () => {
 			// 统一走 updateAnnotationComment：它会刷新 updatedAt。只改 comment 不刷时间，
@@ -3141,23 +3166,55 @@ export class EpubReaderView extends FileView {
 		grip.addEventListener('pointerup', endDrag);
 		grip.addEventListener('pointercancel', endDrag);
 
-		// 批注内容以正常字体、纯文本展示：去 Markdown 源码，120 字截断 +「展开全文 ›/收起 ▲」
-		const comment = cleanAnnotationText(ann.comment ?? '');
-		const MAX_CHARS = 120;
-		const isLong = comment.length > MAX_CHARS;
-		let expanded = false;
+		// 批注内容：AI 批注是 Markdown → 富文本渲染（气泡本身限高滚动，无需截断）；
+		// 手写批注保持纯文本 + 120 字截断 +「展开全文 ›/收起 ▲」
+		const raw = (ann.comment ?? '').trim();
+		const mdComment = isMarkdownComment(raw);
+		const comment = mdComment ? raw : cleanAnnotationText(raw);
 		const content = pop.createDiv('fleur-epub-annview-text');
-		content.setText(isLong ? comment.slice(0, MAX_CHARS) + '...' : comment);
-		if (isLong) {
-			const hint = pop.createDiv('fleur-epub-annview-toggle');
-			hint.setText('展开全文 ›');
-			hint.addEventListener('click', (e) => {
-				e.stopPropagation();
-				expanded = !expanded;
-				content.setText(expanded ? comment : comment.slice(0, MAX_CHARS) + '...');
-				hint.setText(expanded ? '收起 ▲' : '展开全文 ›');
+		if (mdComment) {
+			void renderAnnotationContent(content, comment, this, this.app).then(() => {
+				// 渲染完成才知道真实高度，重新贴一次锚点，避免长批注出屏
+				if (pop.isConnected) this.placeAnnPopup(pop, hostX, hostY);
 			});
+		} else {
+			const MAX_CHARS = 120;
+			const isLong = comment.length > MAX_CHARS;
+			let expanded = false;
+			content.setText(isLong ? comment.slice(0, MAX_CHARS) + '...' : comment);
+			if (isLong) {
+				const hint = pop.createDiv('fleur-epub-annview-toggle');
+				hint.setText('展开全文 ›');
+				hint.addEventListener('click', (e) => {
+					e.stopPropagation();
+					expanded = !expanded;
+					content.setText(expanded ? comment : comment.slice(0, MAX_CHARS) + '...');
+					hint.setText(expanded ? '收起 ▲' : '展开全文 ›');
+				});
+			}
 		}
+
+		// 底部操作行：编辑批注 / 清除高亮与批注（与移动端批注卡、FleurPDF 气泡一致）。
+		// 常驻可见（不大面积 hover 才现形），低对比图标；气泡限高时内容区自己滚动，这行始终在底部。
+		pop.addClass('is-actionable');
+		const actions = pop.createDiv('fleur-epub-annview-actions');
+		const editBtn = actions.createEl('button', 'fleur-epub-annview-action');
+		editBtn.title = '编辑批注';
+		editBtn.setAttribute('aria-label', '编辑批注');
+		setIcon(editBtn, 'pencil');
+		editBtn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			this.showAnnotationEditor(ann, hostX, hostY);
+		});
+		const delBtn = actions.createEl('button', 'fleur-epub-annview-action is-danger');
+		delBtn.title = '清除高亮与批注';
+		delBtn.setAttribute('aria-label', '清除高亮与批注');
+		setIcon(delBtn, 'trash-2');
+		delBtn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			this.hideAnnPopup();
+			void this.deleteAnnotation(ann);
+		});
 
 		this.mountAnnPopupClose(pop);
 		this.placeAnnPopup(pop, hostX, hostY);
