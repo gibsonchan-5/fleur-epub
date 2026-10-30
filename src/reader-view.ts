@@ -2130,7 +2130,9 @@ export class EpubReaderView extends FileView {
 			new Notice('写入失败：选区已失效，请重新选段', 2500);
 			return false;
 		}
-		await this.createAnnotationAt(seed.cfi, seed.text, 'highlight', 'yellow', comment);
+		// 颜色跟随设置里的默认高亮色：与其他入口（✎ 批注、色点）写入的批注保持一致，
+		// 不能再写死 yellow——否则 AI 写入的高亮会与全书的「有批注」颜色不一致
+		await this.createAnnotationAt(seed.cfi, seed.text, 'highlight', this.plugin.settings.highlightColor || 'yellow', comment);
 		new Notice('已写入批注', 1800);
 		return true;
 	}

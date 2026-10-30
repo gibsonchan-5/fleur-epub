@@ -844,7 +844,9 @@ body.fleur-epub-mobile .fleur-epub-annpop-input {
 	max-height: min(40vh, 300px);
 	overflow-y: auto;
 	overscroll-behavior: contain;
-	padding-right: 10px;
+	scrollbar-gutter: stable;
+	/* 与桌面气泡同口径：滚动条贴在 2px 内缩处，文字再留 16px 呼吸位 */
+	padding-right: 16px;
 }
 
 /* 「展开全文 › / 收起 ▲」切换（对齐 FleurAnnotation tooltip） */
@@ -867,21 +869,30 @@ body.fleur-epub-mobile .fleur-epub-annpop-input {
 	flex-direction: column;
 	overflow: hidden;
 	padding-bottom: 0;
+	/* 右侧只留窄边：滚动条更贴卡片边，文字靠内侧留白躲开它（见下） */
+	padding-right: 8px;
+}
+/* 顶部拖拽手柄同步右缘，避免被窄边裁掉一截 */
+.fleur-epub-annview.is-actionable .fleur-epub-annview-grip {
+	margin-right: -8px;
 }
 .fleur-epub-annview.is-actionable .fleur-epub-annview-text {
 	flex: 1 1 auto;
 	min-height: 0;
 	overflow-y: auto;
 	overscroll-behavior: contain;
-	/* 覆盖式滚动条会压在最后一列字上（macOS），留出条宽 */
-	padding-right: 10px;
+	scrollbar-gutter: stable;
+	/* 覆盖式滚动条会压在最后一列字上（macOS），且贴字太近有压迫感：
+	   文字与滚动条之间留出约 10px 呼吸位，滚动条本身落在 8px 外边上 */
+	padding-right: 18px;
 }
 .fleur-epub-annview-actions {
 	flex: 0 0 auto;
 	display: flex;
 	justify-content: flex-end;
 	gap: 2px;
-	margin: 2px -14px 0;
+	/* 右侧对齐新的 8px 外边距（左/上仍按原 14px 内边距铺满） */
+	margin: 2px -8px 0 -14px;
 	padding: 3px 10px 5px;
 	border-top: 1px solid var(--background-modifier-border);
 }
